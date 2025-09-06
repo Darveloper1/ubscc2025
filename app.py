@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response, send_file
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response, send_file, abort
 import re
 import math
 from math import log
@@ -1427,12 +1427,93 @@ def api_2048():
     return jsonify({"nextGrid": next_grid, "endGame": end_game})
 
 
+## CAPTURE THE FLAG
+# ------- Config -------
+PAYLOAD_DIR = os.environ.get("PAYLOAD_DIR", os.path.join(os.getcwd(), "payloads"))
+
+# size limits from the prompt (bytes)
+SIZE_LIMITS = {
+    "crackme": 500,
+    "sqlinject": 500,           # if needed (text/script)
+    "stack": 500,
+    "shellcode": 200,
+    "homework_mini": 100000,
+    "malicious_mini": 100000,
+    "homework": 100000,
+    "malicious": 100000,
+}
+
+# Map routes to filenames in ./payloads
+ROUTE_TO_FILE = {
+    "crackme": "payload_crackme",
+    "sqlinject": "payload_sqlinject",
+    "stack": "payload_stack",
+    "shellcode": "payload_shellcode",
+    "homework_mini": "payload_homework_mini",
+    "malicious_mini": "payload_malicious_mini",
+    "homework": "payload_homework",
+    "malicious": "payload_malicious",
+}
 
 
-# Miscellaneous
-@app.route("/")
-def testing():
-    return "Hello UBS Global Coding Challenge 2025 Singapore"
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({
+        "ok": True,
+        "payload_dir": PAYLOAD_DIR,
+        "endpoints": [f"/payload_{k}" for k in ROUTE_TO_FILE.keys()],
+        "health": "/health",
+    })
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"ok": True})
+
+def _serve_payload(kind: str):
+    fname = ROUTE_TO_FILE[kind]
+    path = os.path.join(PAYLOAD_DIR, fname)
+    if not os.path.isfile(path):
+        abort(404, f"payload {fname} not found")
+    # size check
+    limit = SIZE_LIMITS.get(kind)
+    if limit is not None and os.stat(path).st_size > limit:
+        abort(413, f"payload {fname} exceeds size limit {limit} bytes")
+    # Send the actual file (important: not just bytes in JSON)
+    return send_file(path, as_attachment=True, download_name=fname)
+
+# One handler per route name expected by the coordinator
+@app.route("/payload_crackme", methods=["GET"])
+def payload_crackme():
+    return _serve_payload("crackme")
+
+@app.route("/payload_sqlinject", methods=["GET"])
+def payload_sqlinject():
+    return _serve_payload("sqlinject")
+
+@app.route("/payload_stack", methods=["GET"])
+def payload_stack():
+    return _serve_payload("stack")
+
+@app.route("/payload_shellcode", methods=["GET"])
+def payload_shellcode():
+    return _serve_payload("shellcode")
+
+@app.route("/payload_homework_mini", methods=["GET"])
+def payload_homework_mini():
+    return _serve_payload("homework_mini")
+
+@app.route("/payload_malicious_mini", methods=["GET"])
+def payload_malicious_mini():
+    return _serve_payload("malicious_mini")
+
+@app.route("/payload_homework", methods=["GET"])
+def payload_homework():
+    return _serve_payload("homework")
+
+@app.route("/payload_malicious", methods=["GET"])
+def payload_malicious():
+    return _serve_payload("malicious")
 
 if __name__ == '__main__':
+    os.makedirs(PAYLOAD_DIR, exist_ok=True)
     app.run()
