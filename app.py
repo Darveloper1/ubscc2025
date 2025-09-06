@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import logging, secrets
 from flask_cors import CORS
 import random
-import requests
+# import requests
 
 
 app = Flask(__name__)
