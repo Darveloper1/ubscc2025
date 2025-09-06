@@ -10,11 +10,7 @@ import xml.etree.ElementTree as ET
 import os
 import time
 import threading
-import numpy as np
-from scipy import interpolate, signal
-from scipy.ndimage import gaussian_filter1d
-import warnings
-warnings.filterwarnings('ignore')
+
 
 app = Flask(__name__)
 
@@ -1700,7 +1696,7 @@ def fog_of_wall():
 @app.route("/blankety", methods=["POST"])
 def blankety():
     """
-    Impute missing values in 100 time series using advanced techniques.
+    Impute missing values in 100 time series using pure Python.
     Each series has 1000 elements with some null values.
     """
     try:
@@ -1713,345 +1709,473 @@ def blankety():
         imputed_series = []
         
         for series in series_list:
-            # Convert to numpy array, marking nulls as NaN
-            arr = np.array([float(x) if x is not None else np.nan for x in series])
-            
             # Impute the series
-            imputed = impute_series(arr)
-            
-            # Convert back to list and ensure no NaNs remain
-            imputed_list = imputed.tolist()
-            
-            # Final safety check - replace any remaining NaNs with local average
-            for i in range(len(imputed_list)):
-                if np.isnan(imputed_list[i]) or np.isinf(imputed_list[i]):
-                    imputed_list[i] = get_local_average(imputed_list, i)
-            
-            imputed_series.append(imputed_list)
+            imputed = impute_series_advanced(series)
+            imputed_series.append(imputed)
         
         return jsonify({"answer": imputed_series})
     
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-def impute_series(arr: np.ndarray) -> np.ndarray:
+def impute_series_advanced(series: List) -> List[float]:
     """
-    Main imputation function that tries multiple strategies.
+    Advanced imputation using pure Python with multiple strategies.
     """
-    n = len(arr)
-    valid_mask = ~np.isnan(arr)
+    n = len(series)
+    result = [None] * n
     
-    # If no missing values, return as is
-    if np.all(valid_mask):
-        return arr
+    # Extract valid points
+    valid_points = []
+    for i, val in enumerate(series):
+        if val is not None:
+            valid_points.append((i, float(val)))
+            result[i] = float(val)
     
-    # If all missing, return zeros (edge case)
-    if np.all(~valid_mask):
-        return np.zeros(n)
+    # Handle edge cases
+    if not valid_points:
+        return [0.0] * n
+    if len(valid_points) == n:
+        return [float(v) for v in series]
     
-    # Get valid indices and values
-    valid_indices = np.where(valid_mask)[0]
-    valid_values = arr[valid_mask]
+    # Sort valid points
+    valid_points.sort()
     
-    # Calculate the proportion of missing values
-    missing_ratio = 1 - np.sum(valid_mask) / n
+    # Calculate statistics for adaptive strategy
+    missing_ratio = 1 - len(valid_points) / n
+    values = [v for _, v in valid_points]
     
-    # Choose strategy based on data characteristics
-    result = arr.copy()
+    # Detect signal characteristics
+    is_periodic = detect_periodicity(valid_points)
+    has_trend = detect_trend(valid_points)
+    noise_level = estimate_noise(valid_points)
     
-    if missing_ratio < 0.3:
-        # Low missing ratio - use cubic spline with smoothing
-        result = cubic_spline_impute(arr, valid_indices, valid_values)
-    elif missing_ratio < 0.6:
-        # Medium missing ratio - use PCHIP (shape-preserving)
-        result = pchip_impute(arr, valid_indices, valid_values)
+    # Choose and apply imputation strategy
+    if missing_ratio < 0.3 and len(valid_points) >= 4:
+        # Use cubic spline for dense data
+        impute_cubic_segments(result, valid_points)
+    elif is_periodic and len(valid_points) >= 10:
+        # Use periodic interpolation
+        impute_periodic(result, valid_points)
+    elif has_trend:
+        # Use polynomial fitting
+        impute_polynomial(result, valid_points, degree=2)
     else:
-        # High missing ratio - use linear with smoothing
-        result = linear_with_smoothing(arr, valid_indices, valid_values)
+        # Use piecewise linear
+        impute_linear(result, valid_points)
     
-    # Apply adaptive smoothing based on local variance
-    result = adaptive_smooth(result, valid_mask)
+    # Apply adaptive smoothing
+    if noise_level > 0.1:
+        result = apply_adaptive_smoothing(result, series, valid_points)
     
-    # Ensure continuity at boundaries
-    result = ensure_continuity(result, valid_mask)
+    # Final cleanup
+    for i in range(n):
+        if result[i] is None or math.isnan(result[i]) or math.isinf(result[i]):
+            result[i] = get_safe_value(result, i, valid_points)
     
     return result
 
-def cubic_spline_impute(arr: np.ndarray, valid_indices: np.ndarray, valid_values: np.ndarray) -> np.ndarray:
+def detect_periodicity(valid_points: List[Tuple[int, float]]) -> bool:
     """
-    Use cubic spline interpolation with controlled smoothing.
+    Detect if the signal appears to be periodic.
     """
-    n = len(arr)
-    result = arr.copy()
+    if len(valid_points) < 10:
+        return False
     
-    try:
-        # Add boundary points if needed
-        indices, values = add_boundary_points(valid_indices, valid_values, n)
+    values = [v for _, v in valid_points]
+    n = len(values)
+    
+    # Simple autocorrelation check
+    for lag in range(2, min(n // 2, 50)):
+        correlation = 0
+        count = 0
+        for i in range(n - lag):
+            correlation += values[i] * values[i + lag]
+            count += 1
+        if count > 0:
+            correlation /= count
+            if correlation > 0.7 * sum(v*v for v in values) / n:
+                return True
+    
+    return False
+
+def detect_trend(valid_points: List[Tuple[int, float]]) -> bool:
+    """
+    Detect if there's a significant trend in the data.
+    """
+    if len(valid_points) < 3:
+        return False
+    
+    indices = [i for i, _ in valid_points]
+    values = [v for _, v in valid_points]
+    
+    # Calculate linear regression slope
+    n = len(indices)
+    sum_x = sum(indices)
+    sum_y = sum(values)
+    sum_xy = sum(x * y for x, y in zip(indices, values))
+    sum_x2 = sum(x * x for x in indices)
+    
+    if n * sum_x2 - sum_x * sum_x == 0:
+        return False
+    
+    slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+    
+    # Check if slope is significant relative to data range
+    value_range = max(values) - min(values)
+    if value_range == 0:
+        return False
+    
+    expected_change = abs(slope) * (indices[-1] - indices[0])
+    return expected_change > 0.3 * value_range
+
+def estimate_noise(valid_points: List[Tuple[int, float]]) -> float:
+    """
+    Estimate noise level in the signal.
+    """
+    if len(valid_points) < 3:
+        return 0.0
+    
+    values = [v for _, v in valid_points]
+    
+    # Calculate differences between consecutive values
+    diffs = []
+    for i in range(1, len(values)):
+        diffs.append(abs(values[i] - values[i-1]))
+    
+    if not diffs:
+        return 0.0
+    
+    # Noise estimate based on median absolute difference
+    med_diff = median(diffs)
+    value_range = max(values) - min(values)
+    
+    if value_range == 0:
+        return 0.0
+    
+    return min(1.0, med_diff / value_range)
+
+def impute_cubic_segments(result: List, valid_points: List[Tuple[int, float]]):
+    """
+    Impute using piecewise cubic interpolation.
+    """
+    n = len(result)
+    
+    for i in range(n):
+        if result[i] is None:
+            # Find 4 nearest valid points for cubic interpolation
+            nearby = find_nearest_points(i, valid_points, 4)
+            
+            if len(nearby) >= 2:
+                if len(nearby) >= 4:
+                    # Cubic interpolation
+                    result[i] = lagrange_interpolate(i, nearby[:4])
+                elif len(nearby) >= 3:
+                    # Quadratic interpolation
+                    result[i] = lagrange_interpolate(i, nearby[:3])
+                else:
+                    # Linear interpolation
+                    result[i] = linear_interp(i, nearby[0], nearby[1])
+
+def impute_periodic(result: List, valid_points: List[Tuple[int, float]]):
+    """
+    Impute assuming periodic signal.
+    """
+    n = len(result)
+    
+    # Estimate period
+    period = estimate_period(valid_points)
+    
+    for i in range(n):
+        if result[i] is None:
+            # Look for values at similar phase
+            phase_values = []
+            for idx, val in valid_points:
+                phase_diff = abs((i - idx) % period)
+                if phase_diff < period * 0.1:
+                    phase_values.append(val)
+            
+            if phase_values:
+                result[i] = sum(phase_values) / len(phase_values)
+            else:
+                # Fallback to linear
+                nearby = find_nearest_points(i, valid_points, 2)
+                if len(nearby) >= 2:
+                    result[i] = linear_interp(i, nearby[0], nearby[1])
+                elif nearby:
+                    result[i] = nearby[0][1]
+                else:
+                    result[i] = 0.0
+
+def impute_polynomial(result: List, valid_points: List[Tuple[int, float]], degree: int = 2):
+    """
+    Impute using polynomial fitting.
+    """
+    n = len(result)
+    
+    # Fit polynomial to valid points
+    if len(valid_points) > degree:
+        coeffs = fit_polynomial(valid_points, degree)
         
-        # Create cubic spline with smoothing
-        cs = interpolate.CubicSpline(indices, values, bc_type='natural')
-        
-        # Interpolate missing values
-        all_indices = np.arange(n)
-        interpolated = cs(all_indices)
-        
-        # Only fill in missing values
-        missing_mask = np.isnan(arr)
-        result[missing_mask] = interpolated[missing_mask]
-        
-        # Apply mild smoothing to reduce noise
-        if len(valid_indices) > 10:
-            sigma = min(2, n / 100)
-            result = gaussian_filter1d(result, sigma=sigma)
-            # Restore original valid values
-            result[~missing_mask] = arr[~missing_mask]
-        
-    except Exception:
+        for i in range(n):
+            if result[i] is None:
+                result[i] = evaluate_polynomial(coeffs, i)
+    else:
         # Fallback to linear
-        result = linear_interpolate(arr, valid_indices, valid_values)
-    
-    return result
+        impute_linear(result, valid_points)
 
-def pchip_impute(arr: np.ndarray, valid_indices: np.ndarray, valid_values: np.ndarray) -> np.ndarray:
+def impute_linear(result: List, valid_points: List[Tuple[int, float]]):
     """
-    Use PCHIP (Piecewise Cubic Hermite Interpolating Polynomial) - shape-preserving.
+    Simple linear interpolation between valid points.
     """
-    n = len(arr)
-    result = arr.copy()
-    
-    try:
-        # Add boundary points
-        indices, values = add_boundary_points(valid_indices, valid_values, n)
-        
-        # PCHIP interpolation
-        pchip = interpolate.PchipInterpolator(indices, values)
-        
-        # Interpolate
-        all_indices = np.arange(n)
-        interpolated = pchip(all_indices)
-        
-        # Fill missing values
-        missing_mask = np.isnan(arr)
-        result[missing_mask] = interpolated[missing_mask]
-        
-    except Exception:
-        # Fallback
-        result = linear_interpolate(arr, valid_indices, valid_values)
-    
-    return result
-
-def linear_with_smoothing(arr: np.ndarray, valid_indices: np.ndarray, valid_values: np.ndarray) -> np.ndarray:
-    """
-    Linear interpolation followed by smoothing.
-    """
-    n = len(arr)
-    result = arr.copy()
-    
-    # Linear interpolation
-    result = linear_interpolate(arr, valid_indices, valid_values)
-    
-    # Apply stronger smoothing for high missing ratio
-    sigma = min(5, n / 50)
-    smoothed = gaussian_filter1d(result, sigma=sigma)
-    
-    # Blend original and smoothed
-    missing_mask = np.isnan(arr)
-    result[missing_mask] = smoothed[missing_mask]
-    
-    return result
-
-def linear_interpolate(arr: np.ndarray, valid_indices: np.ndarray, valid_values: np.ndarray) -> np.ndarray:
-    """
-    Basic linear interpolation.
-    """
-    n = len(arr)
-    result = arr.copy()
-    
-    try:
-        # Add boundary points
-        indices, values = add_boundary_points(valid_indices, valid_values, n)
-        
-        # Linear interpolation
-        f = interpolate.interp1d(indices, values, kind='linear', fill_value='extrapolate')
-        
-        # Fill missing values
-        all_indices = np.arange(n)
-        interpolated = f(all_indices)
-        
-        missing_mask = np.isnan(arr)
-        result[missing_mask] = interpolated[missing_mask]
-        
-    except Exception:
-        # Last resort - forward/backward fill
-        result = forward_backward_fill(arr)
-    
-    return result
-
-def add_boundary_points(indices: np.ndarray, values: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Add boundary points for better extrapolation.
-    """
-    indices_list = list(indices)
-    values_list = list(values)
-    
-    # Add start point if needed
-    if 0 not in indices:
-        # Extrapolate backward
-        if len(indices) >= 2:
-            slope = (values[1] - values[0]) / (indices[1] - indices[0])
-            val_0 = values[0] - slope * indices[0]
-            indices_list.insert(0, 0)
-            values_list.insert(0, val_0)
-        else:
-            indices_list.insert(0, 0)
-            values_list.insert(0, values[0])
-    
-    # Add end point if needed
-    if n-1 not in indices:
-        # Extrapolate forward
-        if len(indices) >= 2:
-            slope = (values[-1] - values[-2]) / (indices[-1] - indices[-2])
-            val_n = values[-1] + slope * (n - 1 - indices[-1])
-            indices_list.append(n - 1)
-            values_list.append(val_n)
-        else:
-            indices_list.append(n - 1)
-            values_list.append(values[-1])
-    
-    return np.array(indices_list), np.array(values_list)
-
-def adaptive_smooth(arr: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
-    """
-    Apply adaptive smoothing based on local variance.
-    """
-    n = len(arr)
-    result = arr.copy()
-    
-    # Calculate local variance using sliding window
-    window_size = min(50, n // 10)
-    local_vars = np.zeros(n)
+    n = len(result)
     
     for i in range(n):
-        start = max(0, i - window_size // 2)
-        end = min(n, i + window_size // 2)
-        window_valid = valid_mask[start:end]
-        
-        if np.sum(window_valid) > 2:
-            window_values = arr[start:end][window_valid]
-            local_vars[i] = np.var(window_values)
-    
-    # Smooth the variance estimate
-    local_vars = gaussian_filter1d(local_vars, sigma=5)
-    
-    # Apply adaptive smoothing to imputed values
-    missing_mask = ~valid_mask
-    if np.any(missing_mask):
-        # Normalize variance to [0, 1]
-        if np.max(local_vars) > 0:
-            norm_vars = local_vars / np.max(local_vars)
-        else:
-            norm_vars = np.zeros(n)
-        
-        # Apply variable smoothing
-        for i in np.where(missing_mask)[0]:
-            # Less smoothing for high variance regions
-            sigma = 0.5 + (1 - norm_vars[i]) * 2
-            start = max(0, i - int(sigma * 3))
-            end = min(n, i + int(sigma * 3))
+        if result[i] is None:
+            # Find surrounding valid points
+            left = None
+            right = None
             
-            if end - start > 1:
-                weights = np.exp(-0.5 * ((np.arange(start, end) - i) / sigma) ** 2)
-                weights /= weights.sum()
-                result[i] = np.sum(result[start:end] * weights)
-    
-    return result
-
-def ensure_continuity(arr: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
-    """
-    Ensure smooth transitions between imputed and original values.
-    """
-    n = len(arr)
-    result = arr.copy()
-    missing_mask = ~valid_mask
-    
-    # Find transition points
-    transitions = []
-    for i in range(1, n):
-        if valid_mask[i-1] != valid_mask[i]:
-            transitions.append(i)
-    
-    # Smooth around transitions
-    for t in transitions:
-        start = max(0, t - 5)
-        end = min(n, t + 5)
-        
-        if end - start > 2:
-            # Apply local smoothing
-            result[start:end] = gaussian_filter1d(result[start:end], sigma=1)
+            for idx, val in valid_points:
+                if idx < i:
+                    left = (idx, val)
+                elif idx > i and right is None:
+                    right = (idx, val)
+                    break
             
-            # Restore original valid values
-            for i in range(start, end):
-                if valid_mask[i]:
-                    result[i] = arr[i]
-    
-    return result
+            if left and right:
+                # Linear interpolation
+                result[i] = linear_interp(i, left, right)
+            elif left:
+                # Extrapolate from left
+                if len(valid_points) >= 2:
+                    # Use last two points for extrapolation
+                    second_last = valid_points[-2] if valid_points[-1] == left else None
+                    if second_last:
+                        slope = (left[1] - second_last[1]) / (left[0] - second_last[0])
+                        result[i] = left[1] + slope * (i - left[0])
+                    else:
+                        result[i] = left[1]
+                else:
+                    result[i] = left[1]
+            elif right:
+                # Extrapolate from right
+                if len(valid_points) >= 2:
+                    second = valid_points[1] if valid_points[0] == right else None
+                    if second:
+                        slope = (second[1] - right[1]) / (second[0] - right[0])
+                        result[i] = right[1] + slope * (i - right[0])
+                    else:
+                        result[i] = right[1]
+                else:
+                    result[i] = right[1]
+            else:
+                result[i] = 0.0
 
-def forward_backward_fill(arr: np.ndarray) -> np.ndarray:
+def apply_adaptive_smoothing(result: List[float], original: List, valid_points: List[Tuple[int, float]]) -> List[float]:
     """
-    Simple forward and backward fill for edge cases.
+    Apply adaptive smoothing to reduce noise while preserving structure.
     """
-    result = arr.copy()
-    n = len(arr)
+    n = len(result)
+    smoothed = result.copy()
     
-    # Forward fill
-    last_valid = np.nan
+    # Calculate local variance for adaptive smoothing
     for i in range(n):
-        if not np.isnan(arr[i]):
-            last_valid = arr[i]
-        elif not np.isnan(last_valid):
-            result[i] = last_valid
+        if original[i] is None:  # Only smooth imputed values
+            # Determine window size based on local density
+            window = get_adaptive_window(i, valid_points, n)
+            
+            # Apply weighted average
+            weights = []
+            values = []
+            
+            for j in range(max(0, i - window), min(n, i + window + 1)):
+                weight = math.exp(-0.5 * ((j - i) / (window * 0.5)) ** 2)
+                weights.append(weight)
+                values.append(result[j])
+            
+            if weights:
+                total_weight = sum(weights)
+                smoothed[i] = sum(w * v for w, v in zip(weights, values)) / total_weight
     
-    # Backward fill remaining
-    last_valid = np.nan
-    for i in range(n-1, -1, -1):
-        if not np.isnan(result[i]):
-            last_valid = result[i]
-        elif not np.isnan(last_valid):
-            result[i] = last_valid
+    return smoothed
+
+def find_nearest_points(index: int, valid_points: List[Tuple[int, float]], k: int) -> List[Tuple[int, float]]:
+    """
+    Find k nearest valid points to given index.
+    """
+    distances = [(abs(idx - index), idx, val) for idx, val in valid_points]
+    distances.sort()
+    return [(idx, val) for _, idx, val in distances[:k]]
+
+def lagrange_interpolate(x: int, points: List[Tuple[int, float]]) -> float:
+    """
+    Lagrange polynomial interpolation.
+    """
+    result = 0.0
+    n = len(points)
     
-    # If still NaNs, use global mean
-    if np.any(np.isnan(result)):
-        global_mean = np.nanmean(arr)
-        if not np.isnan(global_mean):
-            result[np.isnan(result)] = global_mean
-        else:
-            result[np.isnan(result)] = 0
+    for i in range(n):
+        xi, yi = points[i]
+        term = yi
+        
+        for j in range(n):
+            if i != j:
+                xj, _ = points[j]
+                term *= (x - xj) / (xi - xj)
+        
+        result += term
     
     return result
 
-def get_local_average(arr: List[float], idx: int, window: int = 10) -> float:
+def linear_interp(x: int, p1: Tuple[int, float], p2: Tuple[int, float]) -> float:
     """
-    Get local average for final safety check.
+    Linear interpolation between two points.
     """
-    n = len(arr)
-    start = max(0, idx - window)
-    end = min(n, idx + window + 1)
+    x1, y1 = p1
+    x2, y2 = p2
     
-    values = []
-    for i in range(start, end):
-        if i != idx and not (np.isnan(arr[i]) or np.isinf(arr[i])):
-            values.append(arr[i])
+    if x2 == x1:
+        return (y1 + y2) / 2
     
-    if values:
-        return np.mean(values)
+    return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+
+def estimate_period(valid_points: List[Tuple[int, float]]) -> int:
+    """
+    Estimate period of a potentially periodic signal.
+    """
+    if len(valid_points) < 10:
+        return 50  # Default guess
     
-    # Last resort - scan entire array
-    all_valid = [x for x in arr if not (np.isnan(x) or np.isinf(x))]
-    if all_valid:
-        return np.mean(all_valid)
+    values = [v for _, v in valid_points]
+    n = len(values)
+    
+    # Try different period lengths
+    best_period = 50
+    best_score = 0
+    
+    for period in range(10, min(n // 2, 200), 5):
+        score = 0
+        count = 0
+        
+        for i in range(n - period):
+            score += values[i] * values[i + period]
+            count += 1
+        
+        if count > 0 and score > best_score:
+            best_score = score
+            best_period = period
+    
+    return best_period
+
+def fit_polynomial(valid_points: List[Tuple[int, float]], degree: int) -> List[float]:
+    """
+    Fit polynomial of given degree using least squares.
+    """
+    n = len(valid_points)
+    
+    # Build matrices for least squares
+    A = []
+    b = []
+    
+    for idx, val in valid_points:
+        row = [idx ** i for i in range(degree + 1)]
+        A.append(row)
+        b.append(val)
+    
+    # Solve using Gaussian elimination (simplified)
+    # For simplicity, just use linear regression for degree <= 2
+    if degree == 1:
+        # Linear regression
+        sum_x = sum(idx for idx, _ in valid_points)
+        sum_y = sum(val for _, val in valid_points)
+        sum_xy = sum(idx * val for idx, val in valid_points)
+        sum_x2 = sum(idx * idx for idx, _ in valid_points)
+        
+        if n * sum_x2 - sum_x * sum_x != 0:
+            slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+            intercept = (sum_y - slope * sum_x) / n
+            return [intercept, slope]
+    elif degree == 2:
+        # Quadratic regression (simplified)
+        # Use three points if available
+        if len(valid_points) >= 3:
+            p1, p2, p3 = valid_points[0], valid_points[len(valid_points)//2], valid_points[-1]
+            return fit_quadratic_three_points(p1, p2, p3)
+    
+    # Default to mean value
+    mean_val = sum(val for _, val in valid_points) / n
+    return [mean_val]
+
+def fit_quadratic_three_points(p1: Tuple[int, float], p2: Tuple[int, float], p3: Tuple[int, float]) -> List[float]:
+    """
+    Fit quadratic through three points.
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    
+    # Solve system of equations for ax^2 + bx + c
+    denom = (x1 - x2) * (x1 - x3) * (x2 - x3)
+    
+    if denom == 0:
+        # Points are collinear, use linear
+        if x3 != x1:
+            slope = (y3 - y1) / (x3 - x1)
+            intercept = y1 - slope * x1
+            return [intercept, slope, 0]
+        else:
+            return [y1, 0, 0]
+    
+    a = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / denom
+    b = (x3*x3 * (y1 - y2) + x2*x2 * (y3 - y1) + x1*x1 * (y2 - y3)) / denom
+    c = (x2 * x3 * (x2 - x3) * y1 + x3 * x1 * (x3 - x1) * y2 + x1 * x2 * (x1 - x2) * y3) / denom
+    
+    return [c, b, a]
+
+def evaluate_polynomial(coeffs: List[float], x: int) -> float:
+    """
+    Evaluate polynomial at given point.
+    """
+    result = 0.0
+    for i, coeff in enumerate(coeffs):
+        result += coeff * (x ** i)
+    return result
+
+def get_adaptive_window(index: int, valid_points: List[Tuple[int, float]], n: int) -> int:
+    """
+    Determine adaptive window size based on local data density.
+    """
+    # Count nearby valid points
+    nearby_count = sum(1 for idx, _ in valid_points if abs(idx - index) <= 50)
+    
+    if nearby_count >= 20:
+        return 3  # Dense data, small window
+    elif nearby_count >= 10:
+        return 5  # Medium density
+    else:
+        return 10  # Sparse data, larger window
+
+def get_safe_value(result: List, index: int, valid_points: List[Tuple[int, float]]) -> float:
+    """
+    Get a safe fallback value for failed imputation.
+    """
+    # Try local average
+    window = 20
+    local_values = []
+    
+    for i in range(max(0, index - window), min(len(result), index + window + 1)):
+        if result[i] is not None and not math.isnan(result[i]) and not math.isinf(result[i]):
+            local_values.append(result[i])
+    
+    if local_values:
+        return sum(local_values) / len(local_values)
+    
+    # Use global average of valid points
+    if valid_points:
+        return sum(val for _, val in valid_points) / len(valid_points)
     
     return 0.0
-
 
 # Miscellaneous
 @app.route("/")
