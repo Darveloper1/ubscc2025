@@ -341,7 +341,6 @@ def health():
 
 def find_best_cycle(goods, ratios):
     n = len(goods)
-    # Force indices to int
     edges = [(int(u), int(v), float(rate)) for u, v, rate in ratios]
 
     best_cycle = []
@@ -381,10 +380,14 @@ def find_best_cycle(goods, ratios):
                     cycle_path.append(cur)
                     cycle_path.reverse()
 
+                    # Trim cycle to start and end at first repeat
+                    start_index = cycle_path.index(cur)
+                    cycle_path = cycle_path[start_index:]
+
                     # Compute gain
                     gain = 1.0
                     for i in range(len(cycle_path) - 1):
-                        u, v = int(cycle_path[i]), int(cycle_path[i + 1])
+                        u, v = cycle_path[i], cycle_path[i + 1]
                         for x, y, r in edges:
                             if x == u and y == v:
                                 gain *= r
@@ -392,9 +395,9 @@ def find_best_cycle(goods, ratios):
 
                     if gain > best_gain:
                         best_gain = gain
-                        best_cycle = [goods[int(i)] for i in cycle_path]
+                        best_cycle = [goods[i] for i in cycle_path]
 
-    # ✅ Fallback if no cycle
+    # Fallback if no cycle
     if not best_cycle:
         if edges:
             u, v, r = edges[0]
@@ -407,8 +410,9 @@ def find_best_cycle(goods, ratios):
 
     return {
         "path": best_cycle,
-        "gain": round((best_gain - 1) * 100, 6)
+        "gain": (best_gain - 1) * 100  # no rounding!
     }
+
 
 
 @app.route("/The-Ink-Archive", methods=["POST"])
