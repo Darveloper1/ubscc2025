@@ -9,6 +9,7 @@ import string
 import xml.etree.ElementTree as ET
 import os
 import time
+import threading
 
 app = Flask(__name__)
 
@@ -1353,6 +1354,376 @@ def slpu():
 @app.get("/")
 def health():
     return "OK", 200
+
+## FOG OF WALL
+
+class Crow:
+    def __init__(self, crow_id: str, x: int, y: int):
+        self.id = str(crow_id)
+        self.x = x
+        self.y = y
+        self.target = None  # (x, y)
+
+class GameState:
+    def __init__(self, challenger_id: str, game_id: str, N: int, K: int, crows_init):
+        self.challenger_id = str(challenger_id)
+        self.game_id = str(game_id)
+        self.N = N
+        self.K = K
+
+        # Map: -1 unknown, 0 empty, 1 wall
+        self.grid = [[-1 for _ in range(N)] for _ in range(N)]
+
+        # Crows
+        self.crows: dict[str, Crow] = {str(c['id']): Crow(str(c['id']), c['x'], c['y']) for c in crows_init}
+
+        # Track scans performed (to avoid duplicates) and planned centers
+        self.scanned_positions: set[tuple[int, int]] = set()
+        self.scanned_centers: set[tuple[int, int]] = set()
+        self.scan_centers_all: set[tuple[int, int]] = self._make_scan_centers()
+
+        # Reserve centers to avoid duplicate assignments
+        self.reserved_by: dict[str, tuple[int, int] | None] = {cid: None for cid in self.crows.keys()}
+
+        # Known walls and empties
+        self.walls: set[tuple[int, int]] = set()
+        self.empties: set[tuple[int, int]] = set()
+
+        # Simple round-robin crow order
+        self.crow_cycle = list(self.crows.keys())
+        self.cycle_index = 0
+
+        # Mutex for state
+        self.lock = threading.Lock()
+
+    # Choose scan centers so that every cell is within Chebyshev radius 2 of some center
+    def _make_scan_centers(self) -> set[tuple[int, int]]:
+        centers = set()
+        def series(limit):
+            # indices like 2, 7, 12, ...; ensure tail coverage with N-3 if needed
+            idxs = list(range(2, limit, 5))
+            if not idxs:
+                # small grids: just use 2 adjusted inside bounds
+                base = min(2, limit - 1)
+                idxs = [max(0, base)]
+            if idxs[-1] + 2 < limit - 1:
+                tail = max(0, limit - 3)
+                if tail not in idxs:
+                    idxs.append(tail)
+            return [i for i in idxs if 0 <= i < limit]
+
+        xs = series(self.N)
+        ys = series(self.N)
+        for x in xs:
+            for y in ys:
+                centers.add((x, y))
+        return centers
+
+    # ----------------------------- Map Updates -----------------------------
+
+    def mark_cell(self, x: int, y: int, val: int):  # val: 0 empty, 1 wall
+        if not (0 <= x < self.N and 0 <= y < self.N):
+            return
+        if self.grid[y][x] == val:
+            return
+        self.grid[y][x] = val
+        if val == 1:
+            self.walls.add((x, y))
+            if (x, y) in self.empties:
+                self.empties.remove((x, y))
+        else:
+            self.empties.add((x, y))
+            if (x, y) in self.walls:
+                self.walls.remove((x, y))
+
+    def apply_move_result(self, crow_id: str, prev_pos: tuple[int, int], direction: str, result_xy: list[int]):
+        cx0, cy0 = prev_pos
+        cx, cy = result_xy
+        crow = self.crows[crow_id]
+        crow.x, crow.y = cx, cy
+
+        # If we didn't move and the intended next cell is in-bounds, deduce it's a wall.
+        dx, dy = DIR_TO_DXY[direction]
+        nx, ny = cx0 + dx, cy0 + dy
+        if (cx, cy) == (cx0, cy0) and 0 <= nx < self.N and 0 <= ny < self.N:
+            self.mark_cell(nx, ny, 1)
+
+        # Mark where we are as empty
+        self.mark_cell(cx, cy, 0)
+
+    def apply_scan_result(self, crow_id: str, scan_result: list[list[str]]):
+        crow = self.crows[crow_id]
+        cx, cy = crow.x, crow.y
+        self.scanned_positions.add((cx, cy))
+        if (cx, cy) in self.scan_centers_all:
+            self.scanned_centers.add((cx, cy))
+
+        # scan_result is 5x5, top-left (0,0), center (2,2) is 'C'
+        for i in range(5):      # rows (y)
+            for j in range(5):  # cols (x)
+                symbol = scan_result[i][j]
+                dx = j - 2
+                dy = i - 2
+                x, y = cx + dx, cy + dy
+                if symbol == 'X':
+                    continue  # out of bounds
+                if not (0 <= x < self.N and 0 <= y < self.N):
+                    continue
+                if symbol == 'W':
+                    self.mark_cell(x, y, 1)
+                else:
+                    # "_" or "C"
+                    self.mark_cell(x, y, 0)
+
+    # ----------------------------- Planning -----------------------------
+
+    def nearest_unscanned_center(self, x: int, y: int, taken: set[tuple[int, int]]) -> tuple[int, int] | None:
+        candidates = list(self.scan_centers_all - self.scanned_centers - taken)
+        if not candidates:
+            return None
+        # Manhattan distance heuristic
+        return min(candidates, key=lambda p: abs(p[0] - x) + abs(p[1] - y))
+
+    def any_unknown_left(self) -> bool:
+        # Quick check: if any cell remains unknown
+        for row in self.grid:
+            for v in row:
+                if v == -1:
+                    return True
+        return False
+
+    # BFS path that avoids known walls; unknown cells are considered passable.
+    def bfs_next_step(self, start: tuple[int, int], goal: tuple[int, int]) -> tuple[int, int] | None:
+        if start == goal:
+            return None
+        sx, sy = start
+        gx, gy = goal
+        N = self.N
+        blocked = self.walls  # current known walls
+
+        q = deque()
+        q.append((sx, sy))
+        visited = {(sx, sy): None}
+
+        while q:
+            x, y = q.popleft()
+            for dx, dy in DXY_LIST:
+                nx, ny = x + dx, y + dy
+                if not (0 <= nx < N and 0 <= ny < N):
+                    continue
+                if (nx, ny) in blocked:
+                    continue
+                if (nx, ny) in visited:
+                    continue
+                visited[(nx, ny)] = (x, y)
+                if (nx, ny) == (gx, gy):
+                    # reconstruct one step
+                    step = (nx, ny)
+                    while visited[step] and visited[step] != (sx, sy):
+                        step = visited[step]
+                    return step
+                q.append((nx, ny))
+        # Unreachable (with current knowledge) — try greedily move closer, avoiding known walls.
+        best = None
+        best_d = 10**9
+        for dx, dy in DXY_LIST:
+            nx, ny = sx + dx, sy + dy
+            if 0 <= nx < N and 0 <= ny < N and (nx, ny) not in blocked:
+                d = abs(nx - gx) + abs(ny - gy)
+                if d < best_d:
+                    best_d, best = d, (nx, ny)
+        return best
+
+    def choose_action(self) -> dict:
+        # 1) Submit as soon as K walls found
+        if len(self.walls) >= self.K:
+            return {
+                "action_type": "submit",
+                "submission": [f"{x}-{y}" for (x, y) in sorted(self.walls)]
+            }
+
+        # 2) Prefer scanning if any crow is standing at an unscanned center (or on an unscanned tile)
+        for cid, crow in self.crows.items():
+            if (crow.x, crow.y) not in self.scanned_positions:
+                return {"action_type": "scan", "crow_id": cid}
+
+        for cid, crow in self.crows.items():
+            if (crow.x, crow.y) in self.scan_centers_all and (crow.x, crow.y) not in self.scanned_centers:
+                return {"action_type": "scan", "crow_id": cid}
+
+        # 3) Assign/refresh targets (nearest unscanned centers), avoiding clashes
+        taken = {t for t in self.reserved_by.values() if t is not None}
+        for cid, crow in self.crows.items():
+            if crow.target is None or crow.target in self.scanned_centers:
+                targ = self.nearest_unscanned_center(crow.x, crow.y, taken)
+                self.reserved_by[cid] = targ
+                crow.target = targ
+                if targ:
+                    taken.add(targ)
+
+        # 4) If no centers remain and we still haven't found all walls, sweep remaining unknowns
+        if all(crow.target is None for crow in self.crows.values()):
+            # pick any crow to move towards a nearby unknown cell
+            target_unknown = None
+            for y in range(self.N):
+                for x in range(self.N):
+                    if self.grid[y][x] == -1:
+                        target_unknown = (x, y)
+                        break
+                if target_unknown:
+                    break
+            if target_unknown:
+                # direct one crow towards it
+                cid = self.crow_cycle[self.cycle_index % len(self.crow_cycle)]
+                crow = self.crows[cid]
+                nxt = self.bfs_next_step((crow.x, crow.y), target_unknown)
+                if nxt is None:
+                    return {"action_type": "scan", "crow_id": cid}
+                direction = dxy_to_dir(nxt[0] - crow.x, nxt[1] - crow.y)
+                return {"action_type": "move", "crow_id": cid, "direction": direction}
+
+            # Nothing left to uncover but still < K walls — be safe & scan where we stand (should be rare)
+            cid = self.crow_cycle[self.cycle_index % len(self.crow_cycle)]
+            return {"action_type": "scan", "crow_id": cid}
+
+        # 5) Move crows toward their targets. Pick one crow per turn, round-robin but prefer the closest.
+        # Choose crow that is either at target (so it can scan) or has the shortest distance to its target.
+        best_choice = None
+        best_metric = 10**9
+        for idx in range(len(self.crow_cycle)):
+            cid = self.crow_cycle[(self.cycle_index + idx) % len(self.crow_cycle)]
+            crow = self.crows[cid]
+            if crow.target is None:
+                continue
+            if (crow.x, crow.y) == crow.target:
+                return {"action_type": "scan", "crow_id": cid}
+            d = abs(crow.x - crow.target[0]) + abs(crow.y - crow.target[1])
+            if d < best_metric:
+                best_metric = d
+                best_choice = cid
+
+        if best_choice is None:
+            # fallback: scan somewhere to reveal more info
+            cid = self.crow_cycle[self.cycle_index % len(self.crow_cycle)]
+            return {"action_type": "scan", "crow_id": cid}
+
+        cid = best_choice
+        crow = self.crows[cid]
+        nxt = self.bfs_next_step((crow.x, crow.y), crow.target)
+        if nxt is None:
+            # At target but it wasn't recognized yet — scan
+            return {"action_type": "scan", "crow_id": cid}
+        direction = dxy_to_dir(nxt[0] - crow.x, nxt[1] - crow.y)
+        return {"action_type": "move", "crow_id": cid, "direction": direction}
+
+    def advance_crow_cycle(self, acted_crow_id: str | None):
+        if acted_crow_id is None:
+            return
+        # move index to next crow after the one who just acted
+        try:
+            idx = self.crow_cycle.index(acted_crow_id)
+            self.cycle_index = (idx + 1) % len(self.crow_cycle)
+        except ValueError:
+            pass
+
+# ----------------------------- Helpers -----------------------------
+
+DIR_TO_DXY = {
+    "N": (0, -1),
+    "S": (0, 1),
+    "W": (-1, 0),
+    "E": (1, 0),
+}
+DXY_TO_DIR = {v: k for k, v in DIR_TO_DXY.items()}
+DXY_LIST = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+
+def dxy_to_dir(dx: int, dy: int) -> str:
+    return DXY_TO_DIR[(dx, dy)]
+
+# Global in-memory storage: (challenger_id, game_id) -> GameState
+GAMES: dict[tuple[str, str], GameState] = {}
+GLOBAL_LOCK = threading.Lock()
+
+# ----------------------------- Flask Route -----------------------------
+
+@app.post("/fog-of-wall")
+def fog_of_wall():
+    payload = request.get_json(force=True, silent=True) or {}
+    challenger_id = str(payload.get("challenger_id", ""))
+    game_id = str(payload.get("game_id", ""))
+
+    if not challenger_id or not game_id:
+        return jsonify({"error": "challenger_id and game_id are required"}), 400
+
+    previous = payload.get("previous_action")
+    test_case = payload.get("test_case")
+
+    key = (challenger_id, game_id)
+
+    # Initialize new test case
+    if test_case and not previous:
+        N = int(test_case["length_of_grid"])
+        K = int(test_case["num_of_walls"])
+        crows_init = test_case["crows"]
+
+        with GLOBAL_LOCK:
+            GAMES[key] = GameState(challenger_id, game_id, N, K, crows_init)
+
+    # Retrieve state
+    with GLOBAL_LOCK:
+        if key not in GAMES:
+            # Some runners may resend previous_action without test_case (rare) — create a minimal state
+            return jsonify({"error": "Game state not initialized"}), 400
+        state = GAMES[key]
+
+    # Apply result from our *previous* action
+    if previous:
+        your_action = previous.get("your_action")
+        crow_id = str(previous.get("crow_id"))
+        if your_action == "move":
+            direction = previous.get("direction")
+            # We need the *prior* position to deduce a blocked move; if we don't have it,
+            # the new position in move_result is authoritative.
+            # We'll infer prev from the move_result and direction reversed if needed.
+            move_result = previous.get("move_result")
+            if move_result is None or direction not in DIR_TO_DXY:
+                return jsonify({"error": "Invalid previous move result"}), 400
+
+            # Try to reconstruct prior position: move_result - direction
+            dx, dy = DIR_TO_DXY[direction]
+            px, py = move_result[0] - dx, move_result[1] - dy
+            # But if blocked, the crow didn't move; in that case prev == move_result.
+            # We'll determine block inside apply_move_result.
+            state.apply_move_result(crow_id, (px, py), direction, move_result)
+
+        elif your_action == "scan":
+            scan_result = previous.get("scan_result")
+            if scan_result is None or len(scan_result) != 5 or any(len(r) != 5 for r in scan_result):
+                return jsonify({"error": "Invalid scan result"}), 400
+            state.apply_scan_result(crow_id, scan_result)
+
+        # If previous action included a crow_id, advance the cycle
+        if previous.get("crow_id"):
+            state.advance_crow_cycle(str(previous["crow_id"]))
+
+    # Decide next action
+    with state.lock:
+        plan = state.choose_action()
+
+    # Build response
+    resp = {
+        "challenger_id": challenger_id,
+        "game_id": game_id,
+        "action_type": plan["action_type"],
+    }
+    if plan["action_type"] in ("move", "scan"):
+        resp["crow_id"] = plan["crow_id"]
+        if plan["action_type"] == "move":
+            resp["direction"] = plan["direction"]
+    elif plan["action_type"] == "submit":
+        resp["submission"] = plan["submission"]
+
+    return jsonify(resp)
 
 
 # Miscellaneous
