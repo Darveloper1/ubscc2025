@@ -1310,6 +1310,7 @@ def trading_bot():
     return jsonify(minimal), 200
 
 
+## 2048
 # -------- 2048 helpers --------
 def normalize_grid(grid: List[List[int]]) -> List[List[int]]:
     # UI sends null for empties; convert to 0, ensure 4x4 ints
