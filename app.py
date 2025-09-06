@@ -6,11 +6,15 @@ app = Flask(__name__)
 def trivia():
     return {
         "answers": [
+            4,
             1,
-            1,
-            1,
-            1,
-            1
+            2,
+            2,
+            3,
+            4,
+            2,
+            5,
+            5
         ]
     }
 
