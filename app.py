@@ -1760,7 +1760,8 @@ class DigitOCR:
         for d in "0123456789":
             img = Image.new("L", (size, size), color=0)
             draw = ImageDraw.Draw(img)
-            w, h = draw.textsize(d, font=font)
+            left, top, right, bottom = draw.textbbox((0, 0), d, font=font)
+            w, h = right - left, bottom - top
             draw.text(((size - w) // 2, (size - h) // 2), d, fill=255, font=font)
             arr = np.array(img)
             # Binarize
