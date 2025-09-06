@@ -6,7 +6,7 @@ app = Flask(__name__)
 def trivia():
     return {
         "answers": [
-            4,
+            3,
             1,
             2,
             2,
@@ -21,7 +21,7 @@ def trivia():
 
 @app.route("/")
 def testing():
-    return "Hello World dar"
+    return "Hello UBS Global Coding Challenge 2025 Singapore"
 
 if __name__ == '__main__':
     app.run()
