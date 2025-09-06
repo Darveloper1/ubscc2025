@@ -31,12 +31,12 @@ def trivia():
             4, #1-9 DONE (36 points)
             3,
             3,
-            1,
+            3,
             4,
             1,
             2,
             1,
-            1
+            1  #10-17 DONE (68 points)
         ]
     }
 
