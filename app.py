@@ -18,7 +18,28 @@ def trivia():
         ]
     }
 
+def calculate_points(customer, concert, priority):
+    points = 0
 
+    # Factor 1: VIP
+    if customer.get("vip_status"):
+        points += 100
+
+    # Factor 2: Credit card
+    credit_card = customer.get("credit_card")
+    if credit_card in priority and priority[credit_card] == concert["name"]:
+        points += 50
+
+    # Factor 3: Latency (distance)
+    cx, cy = customer["location"]
+    bx, by = concert["booking_center_location"]
+    distance = math.sqrt((cx - bx) ** 2 + (cy - by) ** 2)
+    latency_points = max(0, 30 - distance)  # simple linear scale
+    points += latency_points
+
+    return points
+
+@app.route("/ticketing-agent", methods=["POST"])
 def ticketing_agent():
     data = request.get_json()
 
@@ -40,7 +61,6 @@ def ticketing_agent():
         result[customer["name"]] = best_concert
 
     return jsonify(result)
-
 
 @app.route("/")
 def testing():
