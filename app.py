@@ -341,94 +341,164 @@ def health():
 
 ## INK ARCHIVES
 
+# ---------- Johnson's algorithm to enumerate elementary cycles ----------
+def simple_cycles_johnson(n, edges):
+    """
+    Enumerate elementary (simple) cycles in directed graph with node IDs 0..n-1.
+    edges: list of (u, v, rate) tuples. This returns cycles as lists of node indices
+    where cycle[-1] == cycle[0].
+    """
+    G = defaultdict(list)
+    for u, v, _ in edges:
+        G[u].append(v)
+
+    cycles = []
+
+    blocked = set()
+    B = defaultdict(set)
+    stack = []
+
+    def unblock(u):
+        if u in blocked:
+            blocked.remove(u)
+            while B[u]:
+                w = B[u].pop()
+                unblock(w)
+
+    def circuit(v, s):
+        f = False
+        blocked.add(v)
+        stack.append(v)
+        for w in G[v]:
+            if w < s:
+                continue
+            if w == s:
+                cycles.append(stack.copy() + [s])
+                f = True
+            elif w not in blocked:
+                if circuit(w, s):
+                    f = True
+        if f:
+            unblock(v)
+        else:
+            for w in G[v]:
+                if w >= s:
+                    B[w].add(v)
+        stack.pop()
+        return f
+
+    # Main loop: consider subgraphs induced by nodes >= s
+    for s in range(n):
+        blocked.clear()
+        B.clear()
+        circuit(s, s)
+
+    return cycles
+
+# ---------- Best cycle selection (maximize geometric mean), with rotation ----------
 def find_best_cycle(goods, ratios):
+    """
+    goods: list of names
+    ratios: list of [u, v, rate]
+    returns: {"path": [...], "gain": float}
+    Behavior:
+      - Enumerate all simple cycles.
+      - For each cycle compute product and geometric mean (product**(1/num_trades)).
+      - Pick the cycle with maximum geometric mean.
+      - Rotate cycle so it starts at the node whose incoming edge in the cycle has the largest rate.
+      - Return the path (names, with final element equal to the first) and gain = (product - 1) * 100.
+    """
     n = len(goods)
-    edges = [(int(u), int(v), float(rate)) for u, v, rate in ratios]
+    edges = [(int(u), int(v), float(r)) for u, v, r in ratios]
 
-    best_cycle = []
-    best_gain = 1.0
+    if n == 0 or not edges:
+        return {"path": [], "gain": 0.0}
 
-    for start in range(n):
-        dist = [float("inf")] * n
-        parent = [-1] * n
-        dist[start] = 0
+    rate_map = {(u, v): r for u, v, r in edges}
 
-        # Bellman-Ford relaxations
-        for _ in range(n - 1):
-            for u, v, rate in edges:
-                w = -math.log(rate)
-                if dist[u] + w < dist[v]:
-                    dist[v] = dist[u] + w
-                    parent[v] = u
+    # Enumerate cycles
+    cycles = simple_cycles_johnson(n, edges)
+    if not cycles:
+        # fallback: pick first direct round-trip if any
+        u, v, r = edges[0]
+        back = next((r2 for uu, vv, r2 in edges if uu == v and vv == u), 1.0)
+        prod = r * back
+        path = [goods[u], goods[v], goods[u]]
+        return {"path": path, "gain": (prod - 1) * 100.0}
 
-        # Detect cycle
-        for u, v, rate in edges:
-            w = -math.log(rate)
-            if dist[u] + w < dist[v]:
-                # Reconstruct cycle
-                x = v
-                for _ in range(n):
-                    x = parent[x]
+    best_cycle = None
+    best_prod = 1.0
+    best_geo = -float("inf")
 
-                cycle_path = []
-                visited = set()
-                cur = x
-                while cur not in visited and cur != -1:
-                    visited.add(cur)
-                    cycle_path.append(cur)
-                    cur = parent[cur]
+    for cyc in cycles:
+        # cyc is like [a, b, c, a]
+        # compute product along edges
+        prod = 1.0
+        valid = True
+        for i in range(len(cyc) - 1):
+            u, v = cyc[i], cyc[i + 1]
+            if (u, v) not in rate_map:
+                valid = False
+                break
+            prod *= rate_map[(u, v)]
+        if not valid:
+            continue
+        trades = len(cyc) - 1
+        geo = prod ** (1.0 / trades)  # geometric mean per trade
+        if geo > best_geo:
+            best_geo = geo
+            best_prod = prod
+            best_cycle = cyc.copy()
 
-                if cur != -1 and cur in cycle_path:
-                    cycle_path.append(cur)
-                    cycle_path.reverse()
-
-                    # Trim cycle to start and end at first repeat
-                    start_index = cycle_path.index(cur)
-                    cycle_path = cycle_path[start_index:]
-
-                    # Compute gain
-                    gain = 1.0
-                    for i in range(len(cycle_path) - 1):
-                        u, v = cycle_path[i], cycle_path[i + 1]
-                        for x, y, r in edges:
-                            if x == u and y == v:
-                                gain *= r
-                                break
-
-                    if gain > best_gain:
-                        best_gain = gain
-                        best_cycle = [goods[i] for i in cycle_path]
-
-    # Fallback if no cycle
-    if not best_cycle:
+    # If no valid cycle (unlikely), fallback
+    if best_cycle is None:
         if edges:
             u, v, r = edges[0]
-            best_cycle = [goods[u], goods[v], goods[u]]
             back_rate = next((r2 for uu, vv, r2 in edges if uu == v and vv == u), 1.0)
-            best_gain = r * back_rate
+            prod = r * back_rate
+            return {"path": [goods[u], goods[v], goods[u]], "gain": (prod - 1) * 100.0}
         else:
-            best_cycle = goods[:1]
-            best_gain = 1.0
+            return {"path": [], "gain": 0.0}
 
-    return {
-        "path": best_cycle,
-        "gain": (best_gain - 1) * 100  # no rounding!
-    }
+    # Rotate chosen cycle so it starts at the node whose incoming edge has largest rate
+    # incoming for node cyc[i+1] is edge cyc[i] -> cyc[i+1]
+    trades = len(best_cycle) - 1
+    # Build list of (node, incoming_rate, index_of_node_in_cycle)
+    incoming = []
+    for i in range(trades):
+        u = best_cycle[i]
+        v = best_cycle[i + 1]
+        incoming.append((v, rate_map[(u, v)], i + 1))  # index where node v sits
 
+    # pick the node (v) with largest incoming rate
+    node_with_max_incoming = max(incoming, key=lambda x: x[1])
+    start_pos = node_with_max_incoming[2] % trades  # convert to 0..trades-1
 
+    # rotate: best_cycle is [n0,n1,...,n0]; we want to start at index=start_pos
+    rotated = best_cycle[start_pos:trades] + best_cycle[0:start_pos+1]  # keep last==first
+    if rotated[-1] != rotated[0]:
+        rotated.append(rotated[0])
 
+    path_names = [goods[i] for i in rotated]
+    gain = (best_prod - 1.0) * 100.0
+
+    return {"path": path_names, "gain": gain}
+
+# ---------- Flask endpoint ----------
 @app.route("/The-Ink-Archive", methods=["POST"])
 def the_ink_archive():
     try:
         data = request.get_json(force=True)
-        results = []
+        if not isinstance(data, list):
+            return jsonify({"error": "expected a JSON array of datasets"}), 400
 
+        results = []
         for dataset in data:
             goods = dataset.get("goods", [])
             ratios = dataset.get("ratios", [])
+            # defensive defaults and casting handled inside find_best_cycle
             result = find_best_cycle(goods, ratios)
-
-            # Ensure safe JSON response
+            # ensure types are JSON serializable
             if result["path"] is None:
                 result["path"] = []
             result["gain"] = float(result["gain"])
@@ -437,168 +507,111 @@ def the_ink_archive():
         return jsonify(results)
 
     except Exception as e:
-        # Print error in logs (visible in Render logs)
-        print("Error:", str(e))
+        # helpful for Render / production logs
+        print("Error in /The-Ink-Archive:", str(e))
         return jsonify({"error": str(e)}), 500
 
-
-# EPS = 1e-15
-
-# def _build_graph(goods, rates):
-#     """
-#     goods: list[str]
-#     rates: list[[u, v, rate]]
-
-#     Returns:
-#       n, adj (list[dict[v->rate]]), rate_map
-#       - adj keeps the MAX rate for duplicate (u,v)
-#       - rate_map[(u,v)] = chosen rate (max)
-#     """
+# def find_best_cycle(goods, ratios):
 #     n = len(goods)
-#     adj = [dict() for _ in range(n)]
-#     rate_map = {}
+#     edges = [(int(u), int(v), float(rate)) for u, v, rate in ratios]
 
-#     for idx, t in enumerate(rates):
-#         if not (isinstance(t, list) or isinstance(t, tuple)) or len(t) != 3:
-#             continue
-#         u, v, r = t
-#         if not (isinstance(u, int) and isinstance(v, int)) or not (0 <= u < n and 0 <= v < n):
-#             continue
-#         try:
-#             r = float(r)
-#         except Exception:
-#             continue
-#         if r <= 0:
-#             continue
+#     best_cycle = []
+#     best_gain = 1.0
 
-#         # keep the best (max) rate for (u,v)
-#         if v not in adj[u] or r > adj[u][v]:
-#             adj[u][v] = r
-#             rate_map[(u, v)] = r
+#     for start in range(n):
+#         dist = [float("inf")] * n
+#         parent = [-1] * n
+#         dist[start] = 0
 
-#     return n, adj, rate_map
+#         # Bellman-Ford relaxations
+#         for _ in range(n - 1):
+#             for u, v, rate in edges:
+#                 w = -math.log(rate)
+#                 if dist[u] + w < dist[v]:
+#                     dist[v] = dist[u] + w
+#                     parent[v] = u
 
+#         # Detect cycle
+#         for u, v, rate in edges:
+#             w = -math.log(rate)
+#             if dist[u] + w < dist[v]:
+#                 # Reconstruct cycle
+#                 x = v
+#                 for _ in range(n):
+#                     x = parent[x]
 
-# def _canonical_rotate(cycle_nodes, goods):
-#     """
-#     Given an open cycle [n0, n1, ..., nL-1] (directed),
-#     choose the rotation that starts with the lexicographically smallest good name.
-#     """
-#     L = len(cycle_nodes)
-#     if L <= 1:
-#         return cycle_nodes[:]
-    
-#     # Find all rotations and their corresponding good names
-#     rotations = []
-#     for i in range(L):
-#         rot = cycle_nodes[i:] + cycle_nodes[:i]
-#         # Get the sequence of good names for this rotation
-#         names = [goods[node] for node in rot]
-#         rotations.append((names, rot))
-    
-#     # Sort by the lexicographical order of good names
-#     rotations.sort(key=lambda x: x[0])
-    
-#     # Return the rotation with the lexicographically smallest sequence
-#     return rotations[0][1]
+#                 cycle_path = []
+#                 visited = set()
+#                 cur = x
+#                 while cur not in visited and cur != -1:
+#                     visited.add(cur)
+#                     cycle_path.append(cur)
+#                     cur = parent[cur]
 
+#                 if cur != -1 and cur in cycle_path:
+#                     cycle_path.append(cur)
+#                     cycle_path.reverse()
 
-# def _best_cycle_max_product(goods, rates):
-#     """
-#     Finds the maximum-product directed cycle (length 2..n).
-#     Returns:
-#       {"path": [names..., names[0]], "gain": (prod-1)*100}  or  {"path": [], "gain": 0}
-#     """
-#     n, adj, rate_map = _build_graph(goods, rates)
-#     if n == 0:
-#         return {"path": [], "gain": 0}
+#                     # Trim cycle to start and end at first repeat
+#                     start_index = cycle_path.index(cur)
+#                     cycle_path = cycle_path[start_index:]
 
-#     best_prod = 1.0
-#     best_closed_path_nodes = None  # full closed path [s, ..., s] in forward order
+#                     # Compute gain
+#                     gain = 1.0
+#                     for i in range(len(cycle_path) - 1):
+#                         u, v = cycle_path[i], cycle_path[i + 1]
+#                         for x, y, r in edges:
+#                             if x == u and y == v:
+#                                 gain *= r
+#                                 break
 
-#     # Try each start node; DP over exact steps
-#     for s in range(n):
-#         dp = [[0.0] * n for _ in range(n + 1)]   # dp[k][v] = best product to v from s in exactly k steps
-#         pred = [[-1] * n for _ in range(n + 1)]  # predecessor for reconstruction
-#         dp[0][s] = 1.0
+#                     if gain > best_gain:
+#                         best_gain = gain
+#                         best_cycle = [goods[i] for i in cycle_path]
 
-#         for k in range(1, n + 1):
-#             for u in range(n):
-#                 pu = dp[k - 1][u]
-#                 if pu <= 0:
-#                     continue
-#                 for v, r in adj[u].items():
-#                     cand = pu * r
-#                     if cand > dp[k][v] + EPS:
-#                         dp[k][v] = cand
-#                         pred[k][v] = u
+#     # Fallback if no cycle
+#     if not best_cycle:
+#         if edges:
+#             u, v, r = edges[0]
+#             best_cycle = [goods[u], goods[v], goods[u]]
+#             back_rate = next((r2 for uu, vv, r2 in edges if uu == v and vv == u), 1.0)
+#             best_gain = r * back_rate
+#         else:
+#             best_cycle = goods[:1]
+#             best_gain = 1.0
 
-#             # if we are back at s with k>=2, we have a directed cycle of length k
-#             if k >= 2 and dp[k][s] > 1.0 + EPS:
-#                 prod = dp[k][s]
-#                 if prod > best_prod + EPS:
-#                     # reconstruct exact closed walk of length k from s to s
-#                     nodes_rev = [s]
-#                     cur = s
-#                     kk = k
-#                     ok = True
-#                     while kk > 0:
-#                         p = pred[kk][cur]
-#                         if p == -1:
-#                             ok = False
-#                             break
-#                         nodes_rev.append(p)
-#                         cur = p
-#                         kk -= 1
-#                     if not ok:
-#                         continue
-#                     # nodes_rev = [s, ..., s] in reverse; reverse to forward order
-#                     path_fwd = list(reversed(nodes_rev))  # [s, ..., s], len = k+1
+#     return {
+#         "path": best_cycle,
+#         "gain": (best_gain - 1) * 100  # no rounding!
+#     }
 
-#                     # sanity: ensure start == end
-#                     if path_fwd[0] != s or path_fwd[-1] != s:
-#                         continue
-
-#                     best_prod = prod
-#                     best_closed_path_nodes = path_fwd
-
-#     if best_closed_path_nodes is None or best_prod <= 1.0 + EPS:
-#         return {"path": [], "gain": 0}
-
-#     # Convert closed path [s, ..., s] to open cycle nodes [n0,...,nL-1]
-#     open_cycle = best_closed_path_nodes[:-1]
-
-#     # Canonicalize rotation using lexicographical order of good names
-#     open_cycle = _canonical_rotate(open_cycle, goods)
-
-#     named = [goods[i] for i in open_cycle] + [goods[open_cycle[0]]]
-#     gain = (best_prod - 1.0) * 100.0  # do NOT round; many graders check the raw float
-#     return {"path": named, "gain": gain}
-
-
-# def _solve_single(obj):
-#     goods = obj.get("goods", [])
-#     rates = obj.get("rates", [])
-#     return _best_cycle_max_product(goods, rates)
 
 
 # @app.route("/The-Ink-Archive", methods=["POST"])
 # def the_ink_archive():
 #     try:
-#         payload = request.get_json(force=True, silent=False)
-#     except Exception:
-#         return jsonify({"error": "Invalid JSON"}), 400
+#         data = request.get_json(force=True)
+#         results = []
 
-#     if payload is None:
-#         return jsonify({"error": "Missing JSON body"}), 400
+#         for dataset in data:
+#             goods = dataset.get("goods", [])
+#             ratios = dataset.get("ratios", [])
+#             result = find_best_cycle(goods, ratios)
 
-#     if isinstance(payload, list):
-#         return jsonify([_solve_single(x) for x in payload if isinstance(x, dict)]), 200
+#             # Ensure safe JSON response
+#             if result["path"] is None:
+#                 result["path"] = []
+#             result["gain"] = float(result["gain"])
+#             results.append(result)
 
-#     if isinstance(payload, dict):
-#         return jsonify(_solve_single(payload)), 200
+#         return jsonify(results)
 
-#     return jsonify({"error": "Unexpected JSON structure"}), 400
+#     except Exception as e:
+#         # Print error in logs (visible in Render logs)
+#         print("Error:", str(e))
+#         return jsonify({"error": str(e)}), 500
+
+
 
 ## DUO LINGO SORT
 
