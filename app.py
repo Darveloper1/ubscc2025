@@ -2442,6 +2442,362 @@ def the_ink_archive():
 
     return jsonify({"error": "Unexpected JSON structure"}), 400
 
+## DUO LINGO SORT
+
+# -------------------------
+# Utilities: Roman numerals
+# -------------------------
+_ROMAN_MAP = {
+    'I': 1, 'V': 5, 'X': 10, 'L': 50,
+    'C': 100, 'D': 500, 'M': 1000
+}
+_ROMAN_PATTERN = re.compile(r'^(M{0,3})(CM|CD|D?C{0,3})'
+                            r'(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$')
+
+def is_roman(s: str) -> bool:
+    s = s.strip().upper()
+    return bool(s) and bool(re.fullmatch(r'[IVXLCDM]+', s)) and bool(_ROMAN_PATTERN.match(s))
+
+def roman_to_int(s: str) -> int:
+    s = s.strip().upper()
+    total = 0
+    i = 0
+    while i < len(s):
+        v = _ROMAN_MAP[s[i]]
+        if i+1 < len(s) and _ROMAN_MAP[s[i+1]] > v:
+            total += _ROMAN_MAP[s[i+1]] - v
+            i += 2
+        else:
+            total += v
+            i += 1
+    return total
+
+# -------------------------
+# Utilities: Arabic digits
+# -------------------------
+def is_arabic_digits(s: str) -> bool:
+    return bool(re.fullmatch(r'\d+', s.strip()))
+
+# -------------------------
+# Utilities: English words
+# -------------------------
+_EN_UNITS = {
+    "zero":0, "one":1, "two":2, "three":3, "four":4, "five":5,
+    "six":6, "seven":7, "eight":8, "nine":9, "ten":10, "eleven":11,
+    "twelve":12, "thirteen":13, "fourteen":14, "fifteen":15,
+    "sixteen":16, "seventeen":17, "eighteen":18, "nineteen":19
+}
+_EN_TENS = {
+    "twenty":20, "thirty":30, "forty":40, "fifty":50,
+    "sixty":60, "seventy":70, "eighty":80, "ninety":90
+}
+_EN_SCALES = {"hundred":100, "thousand":1_000, "million":1_000_000, "billion":1_000_000_000}
+
+def maybe_english_to_int(s: str) -> int | None:
+    # Normalize
+    t = s.strip().lower()
+    if not re.fullmatch(r"[a-z\- ]+", t):
+        return None
+    t = t.replace("-", " ")
+    tokens = [w for w in t.split() if w and w != "and"]
+    if not tokens:
+        return None
+
+    total, current = 0, 0
+    for w in tokens:
+        if w in _EN_UNITS:
+            current += _EN_UNITS[w]
+        elif w in _EN_TENS:
+            current += _EN_TENS[w]
+        elif w == "hundred":
+            if current == 0:
+                current = 1
+            current *= 100
+        elif w in ("thousand", "million", "billion"):
+            scale = _EN_SCALES[w]
+            if current == 0:
+                current = 1
+            total += current * scale
+            current = 0
+        else:
+            return None
+    return total + current
+
+# -------------------------
+# Utilities: Chinese numerals (Trad & Simp)
+# -------------------------
+# Works for 0 up to billions+ by sectioning at 億/亿 (1e8) and 萬/万 (1e4).
+_CN_DIGITS = {
+    '零':0, '〇':0, '○':0, 'Ｏ':0,
+    '一':1, '二':2, '兩':2, '两':2, '三':3, '四':4, '五':5,
+    '六':6, '七':7, '八':8, '九':9
+}
+_CN_UNITS = {'十':10, '百':100, '千':1000}
+_BIG_UNITS = {'萬':10_000, '万':10_000, '億':100_000_000, '亿':100_000_000}
+
+def contains_chinese_numeral(s: str) -> bool:
+    return any(ch in _CN_DIGITS or ch in _CN_UNITS or ch in _BIG_UNITS for ch in s)
+
+def chinese_to_int(s: str) -> int:
+    s = s.strip()
+    if s == "零" or s == "〇":
+        return 0
+
+    def parse_section(segment: str) -> int:
+        # parse up to thousands within a 10^4 chunk
+        num, last_unit = 0, 1
+        current = 0
+        i = 0
+        # support leading '十' = 10..19
+        if segment and segment[0] == '十':
+            segment = '一' + segment
+        while i < len(segment):
+            ch = segment[i]
+            if ch in _CN_DIGITS:
+                current = _CN_DIGITS[ch]
+                i += 1
+                # If next is a small unit, apply; else just add later
+                if i < len(segment) and segment[i] in _CN_UNITS:
+                    unit = _CN_UNITS[segment[i]]
+                    num += (current if current != 0 else 1) * unit
+                    current = 0
+                    i += 1
+                else:
+                    num += current
+                    current = 0
+            elif ch in _CN_UNITS:
+                # e.g. '十' without explicit digit before
+                unit = _CN_UNITS[ch]
+                num += (1 if current == 0 else current) * unit
+                current = 0
+                i += 1
+            else:
+                # Ignore unrecognized char in this parser scope
+                i += 1
+        return num
+
+    # Split by big units: 億/亿 then 萬/万
+    total = 0
+    # handle 億 / 亿
+    def split_big(s_, unit_chars):
+        idx = -1
+        for uc in unit_chars:
+            j = s_.rfind(uc)
+            if j > idx:
+                idx = j
+        if idx >= 0:
+            return s_[:idx], s_[idx+1:], True
+        return s_, "", False
+
+    # 1) billions (億/亿)
+    left, right, has_yi = split_big(s, ['億','亿'])
+    if has_yi:
+        total += chinese_to_int(left) * 100_000_000
+        s = right
+
+    # 2) ten-thousands (萬/万)
+    left, right, has_wan = split_big(s, ['萬','万'])
+    if has_wan:
+        total += chinese_to_int(left) * 10_000
+        s = right
+
+    # remainder (0..9999)
+    total += parse_section(s)
+    return total
+
+def is_traditional_chinese(s: str) -> bool:
+    return any(ch in "萬億兩" for ch in s)
+
+def is_simplified_chinese(s: str) -> bool:
+    return any(ch in "万亿两" for ch in s)
+
+# -------------------------
+# Utilities: German number words
+# -------------------------
+# Handles concatenations: tausend, hundert, ...und...zig, teens, zehn, etc.
+_DE_UNITS = {
+    "null":0, "ein":1, "eins":1, "eine":1, "einen":1, "einem":1, "einer":1,
+    "zwei":2, "drei":3, "vier":4, "funf":5, "fuenf":5,
+    "sechs":6, "sieben":7, "acht":8, "neun":9
+}
+_DE_TEENS = {
+    "zehn":10, "elf":11, "zwolf":12, "zwoelf":12,
+    "dreizehn":13, "vierzehn":14, "funfzehn":15, "fuenfzehn":15,
+    "sechzehn":16, "siebzehn":17, "achtzehn":18, "neunzehn":19
+}
+_DE_TENS = {
+    "zwanzig":20, "dreissig":30, "dreissig":30, "dreissig":30, "dreissig":30,
+    "dreissig":30,  # keep key; normalization maps ß->ss and ä ö ü -> a o u
+    "dreissig":30,  # idempotent
+}
+# Fill _DE_TENS properly (after normalization)
+_DE_TENS = {
+    "zwanzig":20, "dreissig":30, "dreissig":30, "dreißig":30,  # handled by normalization
+    "vierzig":40, "funfzig":50, "fuenfzig":50,
+    "sechzig":60, "siebzig":70, "achtzig":80, "neunzig":90
+}
+_DE_SCALES = {"hundert":100, "tausend":1000, "million":1_000_000, "millionen":1_000_000}
+
+def _de_norm(t: str) -> str:
+    t = t.lower().strip()
+    t = t.replace("ß","ss")
+    # map umlauts to plain vowels (keeps our mapping simple)
+    t = (t.replace("ä","a").replace("ö","o").replace("ü","u")
+           .replace("ae","a").replace("oe","o").replace("ue","u"))
+    return t
+
+def maybe_german_to_int(s: str) -> int | None:
+    t = _de_norm(s)
+    if not re.fullmatch(r"[a-z]+", t):
+        return None
+
+    # handle millions (rare in tasks, but supported)
+    for kw in ("millionen","million"):
+        if kw in t:
+            parts = t.split(kw, 1)
+            left = parts[0] or "ein"
+            right = parts[1]
+            lval = _de_parse_basic(left)  # how many millions
+            if lval is None:
+                return None
+            rval = maybe_german_to_int(right) or 0
+            return lval * 1_000_000 + rval
+
+    # tausend
+    if "tausend" in t:
+        left, right = t.split("tausend", 1)
+        left = left or "ein"
+        lval = _de_parse_basic(left)
+        if lval is None:
+            return None
+        rval = maybe_german_to_int(right) or 0
+        return lval * 1000 + rval
+
+    # hundert inside
+    if "hundert" in t:
+        left, right = t.split("hundert", 1)
+        left = left or "ein"
+        lval = _de_parse_basic(left)
+        if lval is None:
+            return None
+        rval = _de_parse_basic(right) or 0
+        return lval * 100 + rval
+
+    # otherwise just tens/units/teens
+    return _de_parse_basic(t)
+
+def _de_parse_basic(t: str) -> int | None:
+    if t == "" or t is None:
+        return 0
+    # exact matches
+    if t in _DE_UNITS:
+        return _DE_UNITS[t]
+    if t in _DE_TEENS:
+        return _DE_TEENS[t]
+    if t in _DE_TENS:
+        return _DE_TENS[t]
+    # pattern: siebenundachtzig = sieben + und + achtzig
+    if "und" in t:
+        # split on the last 'und' to handle rare edge concatenations
+        i = t.rfind("und")
+        left, right = t[:i], t[i+3:]
+        # left must be a unit; right a tens
+        lu = _de_parse_basic(left)
+        rt = _DE_TENS.get(right)
+        if lu is not None and rt is not None:
+            return rt + lu
+        # fallback fail
+        return None
+    # handle composed tens like "vierundzwanzig" (already caught by 'und'),
+    # teens already matched; nothing else left
+    return None
+
+# -------------------------
+# Language detection & parse
+# -------------------------
+LANG_ROMAN = "roman"
+LANG_EN = "english"
+LANG_ZH_TRAD = "zh_trad"
+LANG_ZH_SIMP = "zh_simp"
+LANG_DE = "german"
+LANG_ARABIC = "arabic"
+
+# Tie-break order for Part 2 duplicates:
+TIE_ORDER = [LANG_ROMAN, LANG_EN, LANG_ZH_TRAD, LANG_ZH_SIMP, LANG_DE, LANG_ARABIC]
+TIE_INDEX = {lang:i for i,lang in enumerate(TIE_ORDER)}
+
+def parse_any(s: str, part_two: bool = False) -> tuple[int, str]:
+    raw = s
+
+    # Arabic digits
+    if is_arabic_digits(raw):
+        return int(raw), LANG_ARABIC
+
+    # Roman
+    if is_roman(raw):
+        return roman_to_int(raw), LANG_ROMAN
+
+    # Chinese
+    if contains_chinese_numeral(raw):
+        val = chinese_to_int(raw)
+        # decide trad vs simp for tie-order
+        if is_traditional_chinese(raw):
+            return val, LANG_ZH_TRAD
+        if is_simplified_chinese(raw):
+            return val, LANG_ZH_SIMP
+        # ambiguous: default to trad slot (common for generic numerals like 十五)
+        return val, LANG_ZH_TRAD
+
+    # English
+    en = maybe_english_to_int(raw)
+    if en is not None:
+        return en, LANG_EN
+
+    # German
+    de = maybe_german_to_int(raw)
+    if de is not None:
+        return de, LANG_DE
+
+    # If nothing matched in Part 2, treat as error. In Part 1 the input is guaranteed (Roman/Arabic).
+    raise ValueError(f"Unsupported numeral format: {raw}")
+
+
+@app.route("/duolingo-sort", methods=["POST"])
+def duolingo_sort():
+    data = request.get_json(force=True, silent=False)
+    part = str(data.get("part", "")).strip().upper()
+    payload = data.get("challengeInput", {}) or {}
+    items = payload.get("unsortedList", [])
+    if not isinstance(items, list):
+        return jsonify({"error": "challengeInput.unsortedList must be a list of strings"}), 400
+
+    try:
+        if part == "ONE":
+            # Roman + Arabic input; output as decimal strings
+            parsed = []
+            for s in items:
+                s2 = s.strip()
+                if is_arabic_digits(s2):
+                    parsed.append(int(s2))
+                elif is_roman(s2):
+                    parsed.append(roman_to_int(s2))
+                else:
+                    raise ValueError(f"Part ONE only accepts Roman numerals and Arabic digits. Got: {s2}")
+            parsed.sort()
+            return jsonify({"sortedList": [str(x) for x in parsed]})
+
+        elif part == "TWO":
+            enriched = []
+            for s in items:
+                val, lang = parse_any(s, part_two=True)
+                enriched.append((val, TIE_INDEX.get(lang, 999), s, lang))
+            # Sort by value, then by tie-order, then lexicographically for stability
+            enriched.sort(key=lambda x: (x[0], x[1], x[2]))
+            return jsonify({"sortedList": [s for (_, _, s, _) in enriched]})
+        else:
+            return jsonify({"error": "part must be 'ONE' or 'TWO'"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 # Miscellaneous
 @app.route("/")
