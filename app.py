@@ -336,9 +336,9 @@ def slpu():
         return Response(fallback, mimetype="image/svg+xml")
 
 
-@app.get("/")
-def health():
-    return "OK", 200
+# @app.get("/")
+# def health():
+#     return "OK", 200
 
 
 
