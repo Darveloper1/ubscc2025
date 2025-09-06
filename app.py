@@ -12,6 +12,7 @@ import os
 import time
 import threading
 import typing as t
+import json
 
 app = Flask(__name__)
 
@@ -2860,8 +2861,13 @@ def min_boats_needed(slots):
 
 @app.route("/sailing-club/submission", methods=["POST"])
 def submission():
+    raw = request.data.decode("utf-8")
+
+    # Quick cleanup: remove trailing commas before } or ]
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+
     try:
-        payload = request.get_json(force=True, silent=False) or {}
+        payload = json.loads(raw)
     except Exception:
         return jsonify({"error": "Invalid JSON"}), 400
 
@@ -2869,28 +2875,11 @@ def submission():
     solutions = []
 
     for case in test_cases:
-        # Defensive parsing
         cid = case.get("id")
         slots = case.get("input", [])
 
-        # Validate basic structure; if invalid, skip gracefully with empty solution
-        if cid is None or not isinstance(slots, list):
-            continue
-
-        # Filter out obviously bad entries while keeping valid ones
-        clean_slots = []
-        for it in slots:
-            if (
-                isinstance(it, (list, tuple)) and
-                len(it) == 2 and
-                isinstance(it[0], int) and
-                isinstance(it[1], int) and
-                it[0] < it[1]
-            ):
-                clean_slots.append([it[0], it[1]])
-
-        merged = merge_intervals(clean_slots)
-        boats = min_boats_needed(clean_slots)
+        merged = merge_intervals(slots)
+        boats = min_boats_needed(slots)
 
         solutions.append({
             "id": cid,
