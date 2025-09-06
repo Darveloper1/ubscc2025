@@ -22,7 +22,7 @@ def trivia():
         ]
     }
 
-#Challenge 2
+#Challenge 2 (Ticketing Agent)
 def calculate_points(customer, concert, priority):
     points = 0
 
@@ -72,7 +72,7 @@ def ticketing_agent():
 
     return jsonify(result)
 
-# Challenge 14
+# Challenge 14 (Princess Diaries)
 def dijkstra(graph: Dict[int, List[Tuple[int, int]]], start: int) -> Dict[int, int]:
     """
     Find shortest paths from start to all other nodes using Dijkstra's algorithm.
@@ -273,6 +273,7 @@ def princess_diaries():
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 
 
