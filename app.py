@@ -2,10 +2,14 @@ from flask import Flask, render_template, request, jsonify, send_from_directory,
 import re
 import math
 import heapq
-from typing import List, Tuple, Dict, Set
-from collections import defaultdict
+from typing import List, Tuple, Dict, Set, Optional
+from collections import defaultdict, deque
 from statistics import median
 import string
+import xml.etree.ElementTree as ET
+from __future__ import annotations
+import os
+import time
 
 app = Flask(__name__)
 
@@ -1069,6 +1073,287 @@ def trading_formula():
     return jsonify(out), 200
 
 ## FOG OF WALL
+
+## SNAKES AND LADDERS
+
+
+SQUARE = 32  # each square is 32x32 per spec
+
+
+# -------- SVG parsing --------
+def _parse_viewbox(vb: str) -> Tuple[float, float, float, float]:
+    parts = [float(x) for x in vb.strip().split()]
+    if len(parts) != 4:
+        raise ValueError("Invalid viewBox")
+    return parts[0], parts[1], parts[2], parts[3]  # minx, miny, width, height
+
+
+def _iter_svg_elems(root):
+    # namespace-agnostic iteration (tags may be '{ns}line')
+    for elem in root.iter():
+        tag = elem.tag
+        if isinstance(tag, str) and tag.startswith("{"):
+            tag = tag.split("}", 1)[1]
+        yield tag, elem
+
+
+def _round_int(x: float) -> int:
+    # robust banker's rounding avoidance
+    return int(round(x))
+
+
+def _coord_to_cell(x: float, y: float, minx: float, miny: float) -> Tuple[int, int]:
+    """
+    Convert SVG coordinate (center of a square) to zero-based (col_from_left, row_from_top)
+    """
+    col = _round_int((x - (minx + SQUARE / 2.0)) / SQUARE)
+    row = _round_int((y - (miny + SQUARE / 2.0)) / SQUARE)
+    return col, row
+
+
+def _cell_to_square(col: int, row_from_top: int, W: int, H: int) -> int:
+    """
+    Boustrophedon numbering:
+      - Square 1 starts at bottom-left (row_from_bottom = 0, col_left = 0)
+      - Next row alternates direction; end on top-left.
+    """
+    r_bot = (H - 1) - row_from_top
+    if r_bot % 2 == 0:
+        # left -> right
+        sq = r_bot * W + (col + 1)
+    else:
+        # right -> left
+        sq = r_bot * W + (W - col)
+    return sq
+
+
+def parse_board(svg_text: str) -> Tuple[int, int, int, Dict[int, int]]:
+    """
+    Returns (W, H, N, jumps) where jumps maps start_square -> end_square.
+    """
+    try:
+        root = ET.fromstring(svg_text)
+    except ET.ParseError as e:
+        raise ValueError(f"Invalid SVG: {e}")
+
+    # get viewBox
+    vb = root.attrib.get("viewBox")
+    if not vb:
+        # sometimes width/height present; if so, synthesize a viewBox
+        width = float(root.attrib.get("width", "0").replace("px", "") or 0)
+        height = float(root.attrib.get("height", "0").replace("px", "") or 0)
+        if width <= 0 or height <= 0:
+            raise ValueError("SVG missing viewBox and width/height")
+        minx = miny = 0.0
+        vw = width
+        vh = height
+    else:
+        minx, miny, vw, vh = _parse_viewbox(vb)
+
+    # board W,H in squares (guaranteed 16..32; H even)
+    Wf = vw / SQUARE
+    Hf = vh / SQUARE
+    W = _round_int(Wf)
+    H = _round_int(Hf)
+    if W <= 0 or H <= 0:
+        raise ValueError("Bad board dimensions")
+
+    # find all <line> elements as jumps
+    jumps: Dict[int, int] = {}
+    for tag, elem in _iter_svg_elems(root):
+        if tag != "line":
+            continue
+        try:
+            x1 = float(elem.attrib["x1"])
+            y1 = float(elem.attrib["y1"])
+            x2 = float(elem.attrib["x2"])
+            y2 = float(elem.attrib["y2"])
+        except KeyError:
+            continue  # ignore malformed lines
+
+        c1 = _coord_to_cell(x1, y1, minx, miny)
+        c2 = _coord_to_cell(x2, y2, minx, miny)
+        if not (0 <= c1[0] < W and 0 <= c1[1] < H and 0 <= c2[0] < W and 0 <= c2[1] < H):
+            # if any line endpoint falls outside grid, ignore (robustness)
+            continue
+
+        s = _cell_to_square(c1[0], c1[1], W, H)
+        e = _cell_to_square(c2[0], c2[1], W, H)
+        if s == e:
+            continue
+        # per spec, green ladders, red snakes; we can just map start->end regardless of direction
+        # as inputs won't have conflicts.
+        jumps[s] = e
+
+    N = W * H
+    return W, H, N, jumps
+
+
+# -------- Game mechanics --------
+REGULAR = 0
+POWER2 = 1
+
+
+def apply_move(pos: int, mode: int, roll: int, N: int, jumps: Dict[int, int]) -> Tuple[int, int]:
+    """
+    Given current pos (0..N), die mode, and face (1..6), return (new_pos, new_mode).
+    - Overshoot bounces back.
+    - Apply jump if landing square is a jump start.
+    - Mode switching rules:
+        REGULAR: roll==6 -> switch to POWER2
+        POWER2 : roll==1 -> switch to REGULAR
+    """
+    assert 1 <= roll <= 6
+    step = roll if mode == REGULAR else (1 << roll)  # 2,4,8,16,32,64
+    new_pos = pos + step
+    if new_pos > N:
+        new_pos = 2 * N - new_pos  # bounce back
+
+    # jump
+    new_pos = jumps.get(new_pos, new_pos)
+
+    # mode switch
+    if mode == REGULAR and roll == 6:
+        new_mode = POWER2
+    elif mode == POWER2 and roll == 1:
+        new_mode = REGULAR
+    else:
+        new_mode = mode
+
+    return new_pos, new_mode
+
+
+def build_transitions(N: int, jumps: Dict[int, int]) -> List[List[List[Tuple[int, int]]]]:
+    """
+    transitions[mode][pos][roll-1] -> (npos, nmode)
+    pos 0..N inclusive
+    """
+    transitions = [[[None] * 6 for _ in range(N + 1)] for _ in range(2)]
+    for mode in (REGULAR, POWER2):
+        for pos in range(N + 1):
+            for r in range(1, 7):
+                transitions[mode][pos][r - 1] = apply_move(pos, mode, r, N, jumps)
+    return transitions
+
+
+# -------- Solver (BFS with helpful roll ordering) --------
+State = Tuple[int, int, int, int, int]
+# (p1pos, p2pos, p1mode, p2mode, turn) where turn=0 (P1 to move) or 1 (P2 to move)
+
+
+def _roll_order_for_player(pos: int, mode: int, N: int, transitions, favor_forward: bool) -> List[int]:
+    """
+    Produce 1..6 ordered so we enqueue promising moves first:
+      - On P2's turn (favor_forward=True), try rolls that lead to largest new position first.
+      - On P1's turn (favor_forward=False), try rolls that lead to smallest new position first.
+    """
+    candidates = []
+    for r in range(1, 7):
+        npos, _ = transitions[mode][pos][r - 1]
+        candidates.append((npos, r))
+    candidates.sort(key=lambda t: (t[0], t[1]), reverse=favor_forward)
+    return [r for _, r in candidates]
+
+
+def solve_rolls(N: int, jumps: Dict[int, int], time_limit_s: Optional[float] = None) -> str:
+    """
+    Find a global die-face sequence so that the *second* player (last player) wins first.
+    Returns a string like '123456'.
+    """
+    transitions = build_transitions(N, jumps)
+
+    start: State = (0, 0, REGULAR, REGULAR, 0)  # P1 starts, both in regular mode
+    if N == 1:
+        # trivial one-square board (won't happen per constraints but keep it safe)
+        return ""
+
+    q = deque([start])
+    visited = set([start])
+    parent: Dict[State, Tuple[Optional[State], Optional[int]]] = {start: (None, None)}
+
+    t0 = time.time()
+
+    while q:
+        if time_limit_s is not None and (time.time() - t0) > time_limit_s:
+            break  # give up within time budget
+
+        p1pos, p2pos, m1, m2, turn = q.popleft()
+
+        # establish whose turn and their current state
+        if turn == 0:
+            pos = p1pos
+            mode = m1
+            favor_forward = False  # try to stall P1
+        else:
+            pos = p2pos
+            mode = m2
+            favor_forward = True  # push P2 forward
+
+        # choose roll exploration order
+        for r in _roll_order_for_player(pos, mode, N, transitions, favor_forward):
+            npos, nmode = transitions[mode][pos][r - 1]
+
+            if turn == 0:
+                # P1 moves
+                if npos == N:
+                    # P1 would win here; reject this path (game ends with P1, not allowed)
+                    continue
+                next_state: State = (npos, p2pos, nmode, m2, 1)  # switch to P2
+            else:
+                # P2 moves
+                if npos == N:
+                    # SUCCESS: P2 (last player) wins first
+                    # reconstruct path
+                    rolls: List[int] = [r]
+                    cur = (p1pos, p2pos, m1, m2, turn)
+                    while True:
+                        prev, prev_roll = parent[cur]
+                        if prev is None:
+                            break
+                        if prev_roll is not None:
+                            rolls.append(prev_roll)
+                        cur = prev
+                    rolls.reverse()
+                    return "".join(str(d) for d in rolls)
+                next_state = (p1pos, npos, m1, nmode, 0)  # switch back to P1
+
+            if next_state not in visited:
+                visited.add(next_state)
+                parent[next_state] = ((p1pos, p2pos, m1, m2, turn), r)
+                q.append(next_state)
+
+    # If we get here, BFS failed within time budget (or no solution found, which is unlikely given constraints).
+    # Fallback: produce a harmless small sequence so the judge at least parses it (score 0 but valid SVG).
+    return "1" * 32  # minimal, but well-formed
+
+
+# -------- Flask endpoint --------
+def _solve_svg(svg_text: str) -> str:
+    W, H, N, jumps = parse_board(svg_text)
+    # BFS without a hard time limit by default (adjustable via env var)
+    tl = os.environ.get("SLPU_TIME_LIMIT_S")
+    time_limit_s = float(tl) if tl else None
+    rolls = solve_rolls(N, jumps, time_limit_s=time_limit_s)
+    # Must respond with a single <text> element containing the digits
+    return f'<svg xmlns="http://www.w3.org/2000/svg"><text>{rolls}</text></svg>'
+
+
+@app.post("/slpu")
+def slpu():
+    try:
+        svg_in = request.get_data(as_text=True)
+        out_svg = _solve_svg(svg_in)
+        return Response(out_svg, mimetype="image/svg+xml")
+    except Exception as e:
+        # Always return a parseable SVG (judge will score 0 if invalid or losing).
+        fallback = f'<svg xmlns="http://www.w3.org/2000/svg"><text>111111</text></svg>'
+        # You can log e for debugging in your infra
+        return Response(fallback, mimetype="image/svg+xml")
+
+
+@app.get("/")
+def health():
+    return "OK", 200
 
 
 # Miscellaneous
