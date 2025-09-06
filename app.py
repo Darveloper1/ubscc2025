@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import logging, secrets
 from flask_cors import CORS
 import random
+import requests
 
 
 app = Flask(__name__)
@@ -1427,6 +1428,41 @@ def api_2048():
     return jsonify({"nextGrid": next_grid, "endGame": end_game})
 
 
+# CoolCoders
+url = "https://coolcode-hacker-34c5455cd908.herokuapp.com/api/api/assignment/score"
+token = "eyJ1c2VybmFtZSI6IktpbWNoaXF1ZWVuQDEyMyIsImhhc2giOiJhNzg1MzRkYTNiY2I1MzExMGVhYTY1YjNlN2EyNTZmYjBjMWQwMjZjYjE5ZWU0YzdkZTIyNWYyZmU1NGNhYjU5In0="
+username = "sd3lFx"
+assignment_id = 1   # integer, not string
+score = 90            # integer or float
+
+# Headers
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Content-Type": "application/json"
+}
+
+# Request body
+payload = {
+    "username": username,
+    "assignmentId": assignment_id,
+    "score": score
+}
+
+# Send POST request
+response = requests.post(url, json=payload, headers=headers)
+
+# Check response
+if response.status_code == 200:
+    print("Success:", response.json())
+else:
+    print("Error:", response.status_code, response.text)
+
+
+
+# Miscellaneous
+@app.route("/")
+def testing():
+    return "Hello UBS Global Coding Challenge 2025 Singapore"
 ## CAPTURE THE FLAG
 # ------- Config -------
 PAYLOAD_DIR = os.environ.get("PAYLOAD_DIR", os.path.join(os.getcwd(), "payloads"))
