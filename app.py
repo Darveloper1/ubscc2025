@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, jsonify, send_from_directory,
 import math
 import heapq
 from typing import List, Tuple, Dict, Set
+from collections import defaultdict
 
 app = Flask(__name__)
 
