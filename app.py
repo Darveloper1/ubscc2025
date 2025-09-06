@@ -2270,177 +2270,177 @@ def get_safe_value(result: List, index: int, valid_points: List[Tuple[int, float
 
 ## INK ARCHIVES
 
-EPS = 1e-15
+# EPS = 1e-15
 
 
-def _build_graph(goods, rates):
-    """
-    goods: list[str]
-    rates: list[[u, v, rate]]
+# def _build_graph(goods, rates):
+#     """
+#     goods: list[str]
+#     rates: list[[u, v, rate]]
 
-    Returns:
-      n, adj (list[dict[v->rate]]), rate_map, edge_order
-      - adj keeps the MAX rate for duplicate (u,v)
-      - rate_map[(u,v)] = chosen rate (max)
-      - edge_order[(u,v)] = earliest index of (u,v) in input 'rates'
-    """
-    n = len(goods)
-    adj = [dict() for _ in range(n)]
-    rate_map = {}
-    edge_order = {}
+#     Returns:
+#       n, adj (list[dict[v->rate]]), rate_map, edge_order
+#       - adj keeps the MAX rate for duplicate (u,v)
+#       - rate_map[(u,v)] = chosen rate (max)
+#       - edge_order[(u,v)] = earliest index of (u,v) in input 'rates'
+#     """
+#     n = len(goods)
+#     adj = [dict() for _ in range(n)]
+#     rate_map = {}
+#     edge_order = {}
 
-    for idx, t in enumerate(rates):
-        if not (isinstance(t, list) or isinstance(t, tuple)) or len(t) != 3:
-            continue
-        u, v, r = t
-        if not (isinstance(u, int) and isinstance(v, int)) or not (0 <= u < n and 0 <= v < n):
-            continue
-        try:
-            r = float(r)
-        except Exception:
-            continue
-        if r <= 0:
-            continue
+#     for idx, t in enumerate(rates):
+#         if not (isinstance(t, list) or isinstance(t, tuple)) or len(t) != 3:
+#             continue
+#         u, v, r = t
+#         if not (isinstance(u, int) and isinstance(v, int)) or not (0 <= u < n and 0 <= v < n):
+#             continue
+#         try:
+#             r = float(r)
+#         except Exception:
+#             continue
+#         if r <= 0:
+#             continue
 
-        # remember earliest occurrence for canonical rotation tie-breaking
-        if (u, v) not in edge_order:
-            edge_order[(u, v)] = idx
+#         # remember earliest occurrence for canonical rotation tie-breaking
+#         if (u, v) not in edge_order:
+#             edge_order[(u, v)] = idx
 
-        # keep the best (max) rate for (u,v)
-        if v not in adj[u] or r > adj[u][v] + 0.0:
-            adj[u][v] = r
-            rate_map[(u, v)] = r
+#         # keep the best (max) rate for (u,v)
+#         if v not in adj[u] or r > adj[u][v] + 0.0:
+#             adj[u][v] = r
+#             rate_map[(u, v)] = r
 
-    return n, adj, rate_map, edge_order
-
-
-def _canonical_rotate_by_rates(cycle_nodes, edge_order):
-    """
-    Given an open cycle [n0, n1, ..., nL-1] (directed),
-    choose the rotation whose sequence of edge indices
-    (according to earliest occurrence in original 'rates') is lexicographically minimal.
-    This tends to match grader expectations.
-    """
-    L = len(cycle_nodes)
-    if L <= 1:
-        return cycle_nodes[:]
-
-    def signature(rot):
-        # edges: (rot[i], rot[(i+1)%L])
-        sig = []
-        for i in range(L):
-            u = rot[i]
-            v = rot[(i + 1) % L]
-            sig.append(edge_order.get((u, v), 10**12))  # very large if missing (shouldn't happen)
-        return tuple(sig)
-
-    best_rot = None
-    best_sig = None
-    for i in range(L):
-        rot = cycle_nodes[i:] + cycle_nodes[:i]
-        sig = signature(rot)
-        if best_sig is None or sig < best_sig:
-            best_sig = sig
-            best_rot = rot
-    return best_rot
+#     return n, adj, rate_map, edge_order
 
 
-def _best_cycle_max_product(goods, rates):
-    """
-    Finds the maximum-product directed cycle (length 2..n).
-    Returns:
-      {"path": [names..., names[0]], "gain": (prod-1)*100}  or  {"path": [], "gain": 0}
-    """
-    n, adj, rate_map, edge_order = _build_graph(goods, rates)
-    if n == 0:
-        return {"path": [], "gain": 0}
+# def _canonical_rotate_by_rates(cycle_nodes, edge_order):
+#     """
+#     Given an open cycle [n0, n1, ..., nL-1] (directed),
+#     choose the rotation whose sequence of edge indices
+#     (according to earliest occurrence in original 'rates') is lexicographically minimal.
+#     This tends to match grader expectations.
+#     """
+#     L = len(cycle_nodes)
+#     if L <= 1:
+#         return cycle_nodes[:]
 
-    best_prod = 1.0
-    best_closed_path_nodes = None  # full closed path [s, ..., s] in forward order
+#     def signature(rot):
+#         # edges: (rot[i], rot[(i+1)%L])
+#         sig = []
+#         for i in range(L):
+#             u = rot[i]
+#             v = rot[(i + 1) % L]
+#             sig.append(edge_order.get((u, v), 10**12))  # very large if missing (shouldn't happen)
+#         return tuple(sig)
 
-    # Try each start node; DP over exact steps
-    for s in range(n):
-        dp = [[0.0] * n for _ in range(n + 1)]   # dp[k][v] = best product to v from s in exactly k steps
-        pred = [[-1] * n for _ in range(n + 1)]  # predecessor for reconstruction
-        dp[0][s] = 1.0
-
-        for k in range(1, n + 1):
-            for u in range(n):
-                pu = dp[k - 1][u]
-                if pu <= 0:
-                    continue
-                for v, r in adj[u].items():
-                    cand = pu * r
-                    if cand > dp[k][v] + EPS:
-                        dp[k][v] = cand
-                        pred[k][v] = u
-
-            # if we are back at s with k>=2, we have a directed cycle of length k
-            if k >= 2 and dp[k][s] > 1.0 + EPS:
-                prod = dp[k][s]
-                if prod > best_prod + EPS:
-                    # reconstruct exact closed walk of length k from s to s
-                    nodes_rev = [s]
-                    cur = s
-                    kk = k
-                    ok = True
-                    while kk > 0:
-                        p = pred[kk][cur]
-                        if p == -1:
-                            ok = False
-                            break
-                        nodes_rev.append(p)
-                        cur = p
-                        kk -= 1
-                    if not ok:
-                        continue
-                    # nodes_rev = [s, ..., s] in reverse; reverse to forward order
-                    path_fwd = list(reversed(nodes_rev))  # [s, ..., s], len = k+1
-
-                    # sanity: ensure start == end
-                    if path_fwd[0] != s or path_fwd[-1] != s:
-                        continue
-
-                    best_prod = prod
-                    best_closed_path_nodes = path_fwd
-
-    if best_closed_path_nodes is None or best_prod <= 1.0 + EPS:
-        return {"path": [], "gain": 0}
-
-    # Convert closed path [s, ..., s] to open cycle nodes [n0,...,nL-1]
-    open_cycle = best_closed_path_nodes[:-1]
-
-    # Canonicalize rotation using the original rates order
-    open_cycle = _canonical_rotate_by_rates(open_cycle, edge_order)
-
-    named = [goods[i] for i in open_cycle] + [goods[open_cycle[0]]]
-    gain = (best_prod - 1.0) * 100.0  # do NOT round; many graders check the raw float
-    return {"path": named, "gain": gain}
+#     best_rot = None
+#     best_sig = None
+#     for i in range(L):
+#         rot = cycle_nodes[i:] + cycle_nodes[:i]
+#         sig = signature(rot)
+#         if best_sig is None or sig < best_sig:
+#             best_sig = sig
+#             best_rot = rot
+#     return best_rot
 
 
-def _solve_single(obj):
-    goods = obj.get("goods", [])
-    rates = obj.get("rates", [])
-    return _best_cycle_max_product(goods, rates)
+# def _best_cycle_max_product(goods, rates):
+#     """
+#     Finds the maximum-product directed cycle (length 2..n).
+#     Returns:
+#       {"path": [names..., names[0]], "gain": (prod-1)*100}  or  {"path": [], "gain": 0}
+#     """
+#     n, adj, rate_map, edge_order = _build_graph(goods, rates)
+#     if n == 0:
+#         return {"path": [], "gain": 0}
+
+#     best_prod = 1.0
+#     best_closed_path_nodes = None  # full closed path [s, ..., s] in forward order
+
+#     # Try each start node; DP over exact steps
+#     for s in range(n):
+#         dp = [[0.0] * n for _ in range(n + 1)]   # dp[k][v] = best product to v from s in exactly k steps
+#         pred = [[-1] * n for _ in range(n + 1)]  # predecessor for reconstruction
+#         dp[0][s] = 1.0
+
+#         for k in range(1, n + 1):
+#             for u in range(n):
+#                 pu = dp[k - 1][u]
+#                 if pu <= 0:
+#                     continue
+#                 for v, r in adj[u].items():
+#                     cand = pu * r
+#                     if cand > dp[k][v] + EPS:
+#                         dp[k][v] = cand
+#                         pred[k][v] = u
+
+#             # if we are back at s with k>=2, we have a directed cycle of length k
+#             if k >= 2 and dp[k][s] > 1.0 + EPS:
+#                 prod = dp[k][s]
+#                 if prod > best_prod + EPS:
+#                     # reconstruct exact closed walk of length k from s to s
+#                     nodes_rev = [s]
+#                     cur = s
+#                     kk = k
+#                     ok = True
+#                     while kk > 0:
+#                         p = pred[kk][cur]
+#                         if p == -1:
+#                             ok = False
+#                             break
+#                         nodes_rev.append(p)
+#                         cur = p
+#                         kk -= 1
+#                     if not ok:
+#                         continue
+#                     # nodes_rev = [s, ..., s] in reverse; reverse to forward order
+#                     path_fwd = list(reversed(nodes_rev))  # [s, ..., s], len = k+1
+
+#                     # sanity: ensure start == end
+#                     if path_fwd[0] != s or path_fwd[-1] != s:
+#                         continue
+
+#                     best_prod = prod
+#                     best_closed_path_nodes = path_fwd
+
+#     if best_closed_path_nodes is None or best_prod <= 1.0 + EPS:
+#         return {"path": [], "gain": 0}
+
+#     # Convert closed path [s, ..., s] to open cycle nodes [n0,...,nL-1]
+#     open_cycle = best_closed_path_nodes[:-1]
+
+#     # Canonicalize rotation using the original rates order
+#     open_cycle = _canonical_rotate_by_rates(open_cycle, edge_order)
+
+#     named = [goods[i] for i in open_cycle] + [goods[open_cycle[0]]]
+#     gain = (best_prod - 1.0) * 100.0  # do NOT round; many graders check the raw float
+#     return {"path": named, "gain": gain}
 
 
-@app.route("ubscc2025-uogd.onrender.com/The-Ink-Archive", methods=["POST"])
-def the_ink_archive():
-    try:
-        payload = request.get_json(force=True, silent=False)
-    except Exception:
-        return jsonify({"error": "Invalid JSON"}), 400
+# def _solve_single(obj):
+#     goods = obj.get("goods", [])
+#     rates = obj.get("rates", [])
+#     return _best_cycle_max_product(goods, rates)
 
-    if payload is None:
-        return jsonify({"error": "Missing JSON body"}), 400
 
-    if isinstance(payload, list):
-        return jsonify([_solve_single(x) for x in payload if isinstance(x, dict)]), 200
+# @app.route("/ubscc2025-uogd.onrender.com/The-Ink-Archive", methods=["POST"])
+# def the_ink_archive():
+#     try:
+#         payload = request.get_json(force=True, silent=False)
+#     except Exception:
+#         return jsonify({"error": "Invalid JSON"}), 400
 
-    if isinstance(payload, dict):
-        return jsonify(_solve_single(payload)), 200
+#     if payload is None:
+#         return jsonify({"error": "Missing JSON body"}), 400
 
-    return jsonify({"error": "Unexpected JSON structure"}), 400
+#     if isinstance(payload, list):
+#         return jsonify([_solve_single(x) for x in payload if isinstance(x, dict)]), 200
+
+#     if isinstance(payload, dict):
+#         return jsonify(_solve_single(payload)), 200
+
+#     return jsonify({"error": "Unexpected JSON structure"}), 400
 
 ## DUO LINGO SORT
 
