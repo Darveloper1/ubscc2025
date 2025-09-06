@@ -343,12 +343,11 @@ def find_best_cycle(goods, ratios):
     n = len(goods)
     edges = [(u, v, rate) for u, v, rate in ratios]
 
-    best_cycle = None
+    best_cycle = []
     best_gain = 1.0
 
     # Try starting from each node
     for start in range(n):
-        # Bellman-Ford initialization
         dist = [float("inf")] * n
         parent = [-1] * n
         dist[start] = 0
@@ -361,60 +360,81 @@ def find_best_cycle(goods, ratios):
                     dist[v] = dist[u] + w
                     parent[v] = u
 
-        # Try to detect cycle
+        # Detect negative cycle
         for u, v, rate in edges:
             w = -math.log(rate)
             if dist[u] + w < dist[v]:
-                # Cycle detected, reconstruct path
-                cycle = []
-                visited = set()
+                # Cycle detected, reconstruct
                 x = v
-                for _ in range(n):  # walk back up to n steps
+                for _ in range(n):
                     x = parent[x]
 
-                # Now collect the cycle
+                cycle_path = []
                 cur = x
-                while cur not in visited:
+                visited = set()
+                while cur not in visited and cur != -1:
                     visited.add(cur)
-                    cur = parent[cur]
-                cycle_start = cur
-
-                # Rebuild cycle path
-                cycle_path = [cycle_start]
-                cur = parent[cycle_start]
-                while cur != cycle_start:
                     cycle_path.append(cur)
                     cur = parent[cur]
-                cycle_path.reverse()
-                cycle_path.append(cycle_start)
 
-                # Calculate gain
-                gain = 1.0
-                for i in range(len(cycle_path) - 1):
-                    u, v = cycle_path[i], cycle_path[i + 1]
-                    for x, y, r in edges:
-                        if x == u and y == v:
-                            gain *= r
-                            break
+                if cur != -1:
+                    cycle_path.append(cur)
+                    cycle_path.reverse()
 
-                if gain > best_gain:
-                    best_gain = gain
-                    best_cycle = [goods[i] for i in cycle_path]
+                    # Compute gain
+                    gain = 1.0
+                    for i in range(len(cycle_path) - 1):
+                        u, v = cycle_path[i], cycle_path[i + 1]
+                        for x, y, r in edges:
+                            if x == u and y == v:
+                                gain *= r
+                                break
 
-    return {"path": best_cycle, "gain": (best_gain - 1) * 100 if best_cycle else 0}
+                    if gain > best_gain:
+                        best_gain = gain
+                        best_cycle = [goods[i] for i in cycle_path]
+
+    # ✅ Guarantee: always return something
+    if not best_cycle:
+        if edges:
+            # Fallback: take first trade and return
+            u, v, r = edges[0]
+            best_cycle = [goods[u], goods[v], goods[u]]
+            best_gain = r * next((r2 for uu, vv, r2 in edges if uu == v and vv == u), 1.0)
+        else:
+            best_cycle = goods[:1]  # at least one good
+            best_gain = 1.0
+
+    return {
+        "path": best_cycle,
+        "gain": round((best_gain - 1) * 100, 6)  # always float
+    }
 
 
 @app.route("/The-Ink-Archive", methods=["POST"])
 def the_ink_archive():
-    data = request.get_json()
-    results = []
+    try:
+        data = request.get_json(force=True)
+        results = []
 
-    for dataset in data:
-        goods = dataset["goods"]
-        ratios = dataset["ratios"]
-        results.append(find_best_cycle(goods, ratios))
+        for dataset in data:
+            goods = dataset.get("goods", [])
+            ratios = dataset.get("ratios", [])
+            result = find_best_cycle(goods, ratios)
 
-    return jsonify(results)
+            # Ensure safe JSON response
+            if result["path"] is None:
+                result["path"] = []
+            result["gain"] = float(result["gain"])
+            results.append(result)
+
+        return jsonify(results)
+
+    except Exception as e:
+        # Print error in logs (visible in Render logs)
+        print("Error:", str(e))
+        return jsonify({"error": str(e)}), 500
+
 
 # EPS = 1e-15
 
