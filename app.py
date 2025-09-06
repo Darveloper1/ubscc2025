@@ -341,18 +341,18 @@ def health():
 
 def find_best_cycle(goods, ratios):
     n = len(goods)
-    edges = [(u, v, rate) for u, v, rate in ratios]
+    # Force indices to int
+    edges = [(int(u), int(v), float(rate)) for u, v, rate in ratios]
 
     best_cycle = []
     best_gain = 1.0
 
-    # Try starting from each node
     for start in range(n):
         dist = [float("inf")] * n
         parent = [-1] * n
         dist[start] = 0
 
-        # Relax edges n-1 times
+        # Bellman-Ford relaxations
         for _ in range(n - 1):
             for u, v, rate in edges:
                 w = -math.log(rate)
@@ -360,31 +360,31 @@ def find_best_cycle(goods, ratios):
                     dist[v] = dist[u] + w
                     parent[v] = u
 
-        # Detect negative cycle
+        # Detect cycle
         for u, v, rate in edges:
             w = -math.log(rate)
             if dist[u] + w < dist[v]:
-                # Cycle detected, reconstruct
+                # Reconstruct cycle
                 x = v
                 for _ in range(n):
                     x = parent[x]
 
                 cycle_path = []
-                cur = x
                 visited = set()
+                cur = x
                 while cur not in visited and cur != -1:
                     visited.add(cur)
                     cycle_path.append(cur)
                     cur = parent[cur]
 
-                if cur != -1:
+                if cur != -1 and cur in cycle_path:
                     cycle_path.append(cur)
                     cycle_path.reverse()
 
                     # Compute gain
                     gain = 1.0
                     for i in range(len(cycle_path) - 1):
-                        u, v = cycle_path[i], cycle_path[i + 1]
+                        u, v = int(cycle_path[i]), int(cycle_path[i + 1])
                         for x, y, r in edges:
                             if x == u and y == v:
                                 gain *= r
@@ -392,22 +392,22 @@ def find_best_cycle(goods, ratios):
 
                     if gain > best_gain:
                         best_gain = gain
-                        best_cycle = [goods[i] for i in cycle_path]
+                        best_cycle = [goods[int(i)] for i in cycle_path]
 
-    # ✅ Guarantee: always return something
+    # ✅ Fallback if no cycle
     if not best_cycle:
         if edges:
-            # Fallback: take first trade and return
             u, v, r = edges[0]
             best_cycle = [goods[u], goods[v], goods[u]]
-            best_gain = r * next((r2 for uu, vv, r2 in edges if uu == v and vv == u), 1.0)
+            back_rate = next((r2 for uu, vv, r2 in edges if uu == v and vv == u), 1.0)
+            best_gain = r * back_rate
         else:
-            best_cycle = goods[:1]  # at least one good
+            best_cycle = goods[:1]
             best_gain = 1.0
 
     return {
         "path": best_cycle,
-        "gain": round((best_gain - 1) * 100, 6)  # always float
+        "gain": round((best_gain - 1) * 100, 6)
     }
 
 
