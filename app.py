@@ -6,7 +6,7 @@ from collections import defaultdict
 
 app = Flask(__name__)
 
-# Challenge 1
+# Title Challenge
 @app.route("/trivia", methods=["GET"])
 def trivia():
     return {
@@ -23,7 +23,7 @@ def trivia():
         ]
     }
 
-#Challenge 2 (Ticketing Agent)
+# Ticketing Agent
 def calculate_points(customer, concert, priority):
     points = 0
 
@@ -73,7 +73,7 @@ def ticketing_agent():
 
     return jsonify(result)
 
-# Challenge 14 (Princess Diaries)
+# Princess Diaries
 def dijkstra(graph: Dict[int, List[Tuple[int, int]]], start: int) -> Dict[int, int]:
     """
     Find shortest paths from start to all other nodes using Dijkstra's algorithm.
@@ -225,21 +225,8 @@ def princess_diaries():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-from flask import Flask, request, jsonify
-from collections import defaultdict
 
-from flask import Flask, request, jsonify
-from collections import defaultdict
-
-app = Flask(__name__)
-
-@app.after_request
-def _cors(r):
-    r.headers["Access-Control-Allow-Origin"] = "*"
-    r.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    r.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return r
-
+# Universal Bureau of Surveillance
 @app.route("/investigate", methods=["POST", "OPTIONS"], strict_slashes=False)
 def investigate():
     if request.method == "OPTIONS":
