@@ -1429,33 +1429,50 @@ def api_2048():
 
 
 # CoolCoders
-url = "https://coolcode-hacker-34c5455cd908.herokuapp.com/api/api/assignment/score"
-token = "eyJ1c2VybmFtZSI6IktpbWNoaXF1ZWVuQDEyMyIsImhhc2giOiJhNzg1MzRkYTNiY2I1MzExMGVhYTY1YjNlN2EyNTZmYjBjMWQwMjZjYjE5ZWU0YzdkZTIyNWYyZmU1NGNhYjU5In0="
-username = "sd3lFx"
-assignment_id = 1   # integer, not string
-score = 90            # integer or float
+# 🔑 Replace with your actual values
+BEARER_TOKEN = "eyJ1c2VybmFtZSI6IktpbWNoaXF1ZWVuQDEyMyIsImhhc2giOiJhNzg1MzRkYTNiY2I1MzExMGVhYTY1YjNlN2EyNTZmYjBjMWQwMjZjYjE5ZWU0YzdkZTIyNWYyZmU1NGNhYjU5In0="
+PEER_USERNAME = "sd3lFx"
+ASSIGNMENT_ID = 1   # integer, e.g., 5
+SCORE = 100           # the score you want to set
 
-# Headers
-headers = {
-    "Authorization": f"Bearer {token}",
-    "Content-Type": "application/json"
-}
+COOLCODE_URL = "https://coolcode-hacker-34c5455cd908.herokuapp.com/api/api/assignment/score"
 
-# Request body
-payload = {
-    "username": username,
-    "assignmentId": assignment_id,
-    "score": score
-}
+@app.route("/", methods=["POST"])
+def update_peer_score():
+    """
+    This endpoint receives a POST from the challenge,
+    and forwards it to the CoolCode API with the correct
+    credentials and payload.
+    """
 
-# Send POST request
-response = requests.post(url, json=payload, headers=headers)
+    try:
+        # Log incoming request body (for debugging)
+        incoming_data = request.get_json(silent=True) or {}
 
-# Check response
-if response.status_code == 200:
-    print("Success:", response.json())
-else:
-    print("Error:", response.status_code, response.text)
+        # You can either hardcode peer details above,
+        # or let the challenge pass them in incoming_data
+        payload = {
+            "username": PEER_USERNAME,
+            "assignmentId": ASSIGNMENT_ID,
+            "score": SCORE
+        }
+
+        headers = {
+            "Authorization": f"Bearer {BEARER_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
+        # Forward to CoolCode API
+        response = requests.post(COOLCODE_URL, json=payload, headers=headers)
+
+        return jsonify({
+            "forwarded_payload": payload,
+            "status": response.status_code,
+            "response": response.text
+        }), response.status_code
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 ## CAPTURE THE FLAG
