@@ -7,7 +7,6 @@ from collections import defaultdict, deque
 from statistics import median
 import string
 import xml.etree.ElementTree as ET
-from __future__ import annotations
 import os
 import time
 
