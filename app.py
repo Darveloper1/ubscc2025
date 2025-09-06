@@ -943,76 +943,202 @@ SAFE = {
     "pi": math.pi, "e": math.e,
 }
 
+# ---------- helpers: balanced scans ----------
+def _balanced_slice(s, start, open_char, close_char):
+    """Return (end_index, inner_string) for the balanced region starting at s[start] == open_char."""
+    assert s[start] == open_char
+    k, depth = start + 1, 0
+    while k < len(s):
+        c = s[k]
+        if c == open_char:
+            depth += 1
+        elif c == close_char:
+            if depth == 0:
+                return k, s[start+1:k]
+            depth -= 1
+        k += 1
+    raise ValueError("Unbalanced delimiters")
+
+# ---------- LaTeX -> Python rewrites ----------
 def _replace_frac(s: str) -> str:
-    # balanced \frac{A}{B} -> ((A)/(B))
+    # Replace every \frac{A}{B} with ((A)/(B))
+    out = []
+    i = 0
+    while i < len(s):
+        if s.startswith(r"\frac", i):
+            i += len(r"\frac")
+            if i >= len(s) or s[i] != "{":  # malformed, just leave
+                out.append(r"\frac")
+                continue
+            r1, A = _balanced_slice(s, i, "{", "}")
+            i = r1 + 1
+            if i >= len(s) or s[i] != "{":
+                out.append(f"({A})")  # best-effort
+                continue
+            r2, B = _balanced_slice(s, i, "{", "}")
+            i = r2 + 1
+            out.append(f"(({A})/({B}))")
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+def _replace_exp_e(s: str) -> str:
+    # e^{...} -> exp(...); e^x -> exp(x)
+    s = re.sub(r"e\^\{([^{}]+)\}", r"exp(\1)", s)
+    s = re.sub(r"e\^([A-Za-z0-9_\.]+)", r"exp(\1)", s)
+    return s
+
+def _replace_pow_braced(s: str) -> str:
+    # x^{y} -> x**(y). Handle any token before ^.
+    return re.sub(r"\^\{([^{}]+)\}", r"**(\1)", s)
+
+def _replace_pow_simple(s: str) -> str:
+    # a^b -> a**b (for remaining cases, after braced handled)
+    return s.replace("^", "**")
+
+def _replace_log_base(s: str) -> str:
+    # \log_{b}(x) -> log(x, b)
+    i = 0
+    out = []
+    while i < len(s):
+        if s.startswith(r"\log_", i):
+            i += len(r"\log_")
+            # optional {base} or immediate token
+            if i < len(s) and s[i] == "{":
+                j, base = _balanced_slice(s, i, "{", "}")
+                i = j + 1
+            else:
+                # read bare token for base
+                m = re.match(r"[A-Za-z0-9_\.]+", s[i:])
+                base = m.group(0) if m else ""
+                i += len(base)
+            # next must be (args)
+            if i < len(s) and s[i] == "(":
+                j, arg = _balanced_slice(s, i, "(", ")")
+                i = j + 1
+                out.append(f"log({arg},{base})")
+            else:
+                out.append("log("); out.append(base); out.append(")")
+        else:
+            out.append(s[i]); i += 1
+    return "".join(out)
+
+def _replace_abs_bars(s: str) -> str:
+    # Replace |...| with abs(...), supports multiple pairs.
+    res, open_flag = [], False
+    for ch in s:
+        if ch == "|":
+            if not open_flag:
+                res.append("abs(")
+            else:
+                res.append(")")
+            open_flag = not open_flag
+        else:
+            res.append(ch)
+    return "".join(res)
+
+def _replace_sum(s: str) -> str:
+    # \sum_{i=a}^{b} body  -> __SUM__(i,a,b,(body))
+    # body may be {...} or (...) or next token
+    patt = re.compile(r"\\sum_\{([^}=]+)=([^}]+)\}\^\{([^}]+)\}")
     while True:
-        i = s.find(r"\frac")
-        if i == -1: return s
-        j = s.find("{", i)
-        if j == -1: return s
-        # {A}
-        k, d = j+1, 0
-        while k < len(s):
-            if s[k] == "{": d += 1
-            elif s[k] == "}":
-                if d == 0: break
-                d -= 1
-            k += 1
-        if k >= len(s): return s
-        A = s[j+1:k]
-        k += 1
-        if k >= len(s) or s[k] != "{": return s
-        k += 1
-        b0, d = k, 0
-        while k < len(s):
-            if s[k] == "{": d += 1
-            elif s[k] == "}":
-                if d == 0: break
-                d -= 1
-            k += 1
-        if k >= len(s): return s
-        B = s[b0:k]
-        s = s[:i] + f"(({A})/({B}))" + s[k+1:]
+        m = patt.search(s)
+        if not m:
+            return s
+        var, lo, hi = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+        body_start = m.end()
+        if body_start < len(s) and s[body_start] == "{":
+            end, body = _balanced_slice(s, body_start, "{", "}")
+            repl = f"__SUM__({var},{lo},{hi},({body}))"
+            s = s[:m.start()] + repl + s[end+1:]
+        elif body_start < len(s) and s[body_start] == "(":
+            end, body = _balanced_slice(s, body_start, "(", ")")
+            repl = f"__SUM__({var},{lo},{hi},({body}))"
+            s = s[:m.start()] + repl + s[end+1:]
+        else:
+            # consume next token
+            m2 = re.match(r"[A-Za-z0-9_\.]+", s[body_start:])
+            body = m2.group(0) if m2 else ""
+            repl = f"__SUM__({var},{lo},{hi},({body}))"
+            s = s[:m.start()] + repl + s[body_start+len(body):]
     # never reached
 
-def _replace_exp(s: str) -> str:
-    s = re.sub(r"e\^\{([^{}]+)\}", r"exp(\1)", s)               # e^{...}
-    s = re.sub(r"e\^([A-Za-z0-9_\.]+)", r"exp(\1)", s)           # e^x
-    return s
-
-def latex_to_python(s: str) -> str:
+def _latex_to_python(s: str) -> str:
     s = s.strip()
-    s = s.replace("$$","").replace("$","").replace(r"\(","").replace(r"\)","")
-    s = s.replace(r"\left","").replace(r"\right","")
-    if "=" in s:                       # keep RHS only
+    # strip wrappers
+    s = s.replace("$$", "").replace("$", "").replace(r"\(", "").replace(r"\)", "")
+    s = s.replace(r"\left", "").replace(r"\right", "")
+
+    # keep RHS if there's '='
+    if "=" in s:
         s = s.split("=", 1)[1]
 
-    s = _replace_frac(s)               # do BEFORE removing braces in \text
-    s = _replace_exp(s)
+    # do the structured transforms first
+    s = _replace_frac(s)
+    s = _replace_exp_e(s)
+    s = _replace_pow_braced(s)   # before generic ^
+    s = _replace_log_base(s)
+    s = _replace_sum(s)
+    s = _replace_abs_bars(s)
 
-    s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)   # \text{X} -> X
-    s = s.replace(r"\times","*").replace(r"\cdot","*").replace("·","*")
-    s = s.replace("−","-")
-    s = s.replace(r"\max","max").replace(r"\min","min")
-    s = s.replace(r"\log","log").replace(r"\ln","ln")
+    # \text{Var} -> Var
+    s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
+    # common functions/operators
+    s = s.replace(r"\times", "*").replace(r"\cdot", "*").replace("·", "*")
+    s = s.replace("−", "-")
+    s = s.replace(r"\max", "max").replace(r"\min", "min")
+    s = s.replace(r"\log", "log").replace(r"\ln", "ln")
+    # greek/latex names: \alpha -> alpha, \sigma -> sigma, etc.
+    s = re.sub(r"\\([A-Za-z]+)", r"\1", s)
+    # bracketed variables E[R_m] -> E_R_m
+    s = s.replace("[", "_").replace("]", "")
+    s = s.replace(r"\_", "_")
 
-    s = re.sub(r"\\([A-Za-z]+)", r"\1", s)       # \alpha -> alpha, etc.
-    s = s.replace("[","_").replace("]","")       # E[R_m] -> E_R_m
-    s = s.replace(r"\_","_")
+    # remaining powers a^b -> a**b
+    s = _replace_pow_simple(s)
 
-    s = s.replace("^","**")                      # x^2 -> x**2  (after e^ handled)
-    s = re.sub(r"\s+","", s)
+    # convert any remaining braces to parentheses (for max{a,b}, etc.)
+    s = s.replace("{", "(").replace("}", ")")
+
+    # collapse whitespace
+    s = re.sub(r"\s+", "", s)
     return s
 
-def eval_formula(latex: str, vars_map: dict) -> float:
-    expr = latex_to_python(latex)
+def _eval_sum(body, var, lo, hi, scope):
+    # inclusive bounds; allow expressions for lo/hi
+    lo_v = int(round(eval(str(lo), {"__builtins__": None, **SAFE}, scope)))
+    hi_v = int(round(eval(str(hi), {"__builtins__": None, **SAFE}, scope)))
+    total = 0.0
+    for _i in range(lo_v, hi_v + 1):
+        scope[var] = _i
+        total += eval(str(body), {"__builtins__": None, **SAFE}, scope)
+    scope.pop(var, None)
+    return total
+
+def _evaluate(latex: str, vars_map: dict) -> float:
+    expr = _latex_to_python(latex)
     scope = {k: float(v) for k, v in vars_map.items()}
-    val = eval(expr, {"__builtins__": None, **SAFE}, scope)
+
+    # support __SUM__(i, lo, hi, (body))
+    def __SUM__(var, lo, hi, body):
+        return _eval_sum(body, var, lo, hi, scope)
+
+    val = eval(expr, {"__builtins__": None, **SAFE, "__SUM__": __SUM__}, scope)
     return float(f"{float(val):.4f}")
 
-@app.route("/trading-formula", methods=["POST","OPTIONS"], strict_slashes=False)
+# ---------- API ----------
+@app.after_request
+def _cors(r):
+    r.headers["Access-Control-Allow-Origin"] = "*"
+    r.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    r.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return r
+
+@app.route("/trading-formula", methods=["POST", "OPTIONS"], strict_slashes=False)
 def trading_formula():
-    if request.method == "OPTIONS": return ("", 204)
+    if request.method == "OPTIONS":
+        return ("", 204)
     payload = request.get_json(silent=True)
     if payload is None:
         try:
@@ -1025,11 +1151,13 @@ def trading_formula():
     out = []
     for t in payload:
         try:
-            out.append({"result": eval_formula(t["formula"], t.get("variables", {}))})
+            out.append({"result": _evaluate(t["formula"], t.get("variables", {}))})
         except Exception as e:
+            # log and return 0.0 for robustness (you can switch to 400 if desired)
             app.logger.exception("formula failed: %r", t.get("formula"))
             out.append({"result": 0.0})
     return jsonify(out), 200
+
 
 # Miscellaneous
 @app.route("/")
