@@ -487,14 +487,7 @@ def convex_hull(points):
     return hull
 
 def analyze_coordinates(coord_list):
-    """
-    Heuristic pipeline:
-    - parse to floats
-    - remove outliers (MAD)
-    - compute convex hull of remaining points
-    - return number of hull vertices as the 'hidden numeric parameter'
-    (This is intentionally generic but robust for many puzzles where points form a simple polygon/shape.)
-    """
+    # 1) parse floats and remove outliers (MAD)
     pts = []
     for pair in coord_list:
         try:
@@ -505,11 +498,162 @@ def analyze_coordinates(coord_list):
         return None
     filtered = mad_outlier_filter(pts)
     if len(filtered) < 3:
-        # fallback: use count of non-decoy points
-        return len(filtered)
+        return str(len(filtered))
+
+    # 2) normalize to 28x28 grid
+    xs = [p[0] for p in filtered]
+    ys = [p[1] for p in filtered]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    # avoid degenerate ranges
+    dx = maxx - minx or 1.0
+    dy = maxy - miny or 1.0
+
+    GRID = 28
+    grid = [[0]*GRID for _ in range(GRID)]
+    for (x,y) in filtered:
+        gx = int(((x - minx) / dx) * (GRID-1))
+        gy = int(((y - miny) / dy) * (GRID-1))
+        # flip y so origin is at top-left for consistency
+        gy = GRID - 1 - gy
+        grid[gy][gx] = 1
+
+    # 3) simple dilation to thicken points
+    def dilate(g):
+        new = [row[:] for row in g]
+        for r in range(GRID):
+            for c in range(GRID):
+                if g[r][c]:
+                    for dr in (-1,0,1):
+                        for dc in (-1,0,1):
+                            rr, cc = r+dr, c+dc
+                            if 0 <= rr < GRID and 0 <= cc < GRID:
+                                new[rr][cc] = 1
+        return new
+    grid = dilate(grid)
+    grid = dilate(grid)
+
+    # 4) digit templates (simple stylized 28x28 binary masks).
+    # These are minimal, hand-coded shapes — not perfect fonts, but adequate for puzzle digits.
+    # To keep answer concise, create templates programmatically by drawing rough strokes.
+    def make_empty():
+        return [[0]*GRID for _ in range(GRID)]
+    templates = {}
+    # 0: ring
+    t = make_empty()
+    for r in range(6,22):
+        for c in range(8,20):
+            # approximate ellipse: border
+            if (r-14)**2/64 + (c-14)**2/36 >= 1 and (r-14)**2/64 + (c-14)**2/36 <= 1.8:
+                t[r][c]=1
+    templates['0']=t
+    # 1: vertical
+    t = make_empty()
+    for r in range(6,22):
+        for c in range(12,16):
+            t[r][c]=1
+    templates['1']=t
+    # 2: top, diag, bottom
+    t = make_empty()
+    for c in range(6,22):
+        t[6][c]=1
+        t[14][c]=1
+        t[22][c]=1
+    for i in range(0,9):
+        t[7+i][16+i]=1
+    for i in range(0,9):
+        t[15+i][8+i]=1
+    templates['2']=t
+    # 3: two bumps
+    t = make_empty()
+    for c in range(8,20):
+        t[6][c]=1; t[14][c]=1; t[22][c]=1
+    for i in range(0,9):
+        t[6+i][20 - (i//3)] = 1
+        t[14+i][20 - (i//3)] = 1
+    templates['3']=t
+    # 4: left vertical top, right vertical full
+    t = make_empty()
+    for r in range(6,15):
+        t[r][8]=1
+    for r in range(6,23):
+        t[r][18]=1
+    for c in range(8,19):
+        t[14][c]=1
+    templates['4']=t
+    # 5: mirror of 2
+    t = make_empty()
+    for c in range(8,20):
+        t[6][c]=1; t[14][c]=1; t[22][c]=1
+    for i in range(0,9):
+        t[7+i][8+i]=1
+    for i in range(0,7):
+        t[15+i][16-i]=1
+    templates['5']=t
+    # 6: ring with left vertical
+    t = make_empty()
+    for r in range(6,22):
+        for c in range(8,20):
+            if (r-14)**2/64 + (c-14)**2/36 >= 1 and (r-14)**2/64 + (c-14)**2/36 <= 1.8:
+                t[r][c]=1
+    for r in range(11,23):
+        t[r][8]=1
+    t[14][12]=1
+    templates['6']=t
+    # 7: top bar and diagonal down right
+    t = make_empty()
+    for c in range(8,22):
+        t[6][c]=1
+    for i in range(0,16):
+        r = 7 + i
+        c = 20 - (i//1.2)
+        if 0<=r<GRID and 0<=c<GRID:
+            t[int(r)][int(c)]=1
+    templates['7']=t
+    # 8: two rings
+    t = make_empty()
+    for center in (10,18):
+        for r in range(6,22):
+            for c in range(8,20):
+                if (r-center)**2/36 + (c-14)**2/36 >= 0.8 and (r-center)**2/36 + (c-14)**2/36 <= 1.6:
+                    t[r][c]=1
+    templates['8']=t
+    # 9: ring with right vertical
+    t = make_empty()
+    for r in range(6,22):
+        for c in range(8,20):
+            if (r-12)**2/64 + (c-14)**2/36 >= 1 and (r-12)**2/64 + (c-14)**2/36 <= 1.8:
+                t[r][c]=1
+    for r in range(6,13):
+        t[r][20]=1
+    templates['9']=t
+
+    # 5) compare: compute Jaccard similarity
+    def jaccard(a, b):
+        inter = 0
+        uni = 0
+        for r in range(GRID):
+            for c in range(GRID):
+                if a[r][c] or b[r][c]:
+                    uni += 1
+                    if a[r][c] and b[r][c]:
+                        inter += 1
+        return inter / uni if uni else 0.0
+
+    best_digit = None
+    best_score = 0.0
+    for d, t in templates.items():
+        score = jaccard(grid, t)
+        if score > best_score:
+            best_score = score
+            best_digit = d
+
+    # threshold: require decent overlap, otherwise fallback to hull vertex count
+    if best_score >= 0.25:
+        return str(int(best_digit))
+    # fallback: hull vertex count
     hull = convex_hull(filtered)
-    # numeric parameter: hull vertex count
-    return len(hull)
+    return str(len(hull))
 
 # ----------------------------
 # Challenge 3: Log parsing & ciphers
@@ -636,22 +780,41 @@ def rot13(s):
     return s.translate(trans)
 
 def decrypt_payload(cipher_type, payload):
-    ctype = cipher_type.strip().upper()
-    if ctype == "RAILFENCE":
+    # flexible wrapper for cipher types and synonyms
+    ctype = (cipher_type or "").strip().upper()
+    if ctype in ("RAILFENCE", "RAIL FENCE", "RAIL-FENCE"):
         return rail_fence_decrypt(payload, rails=3)
-    if ctype == "KEYWORD":
-        # Keyword substitution using SHADOW
-        return keyword_decrypt(payload, keyword="SHADOW")
-    if ctype == "POLYBIUS":
+    if ctype in ("KEYWORD", "KEYWORD_SUB", "KEYWORD_CIPHER"):
+        # Try both mapping directions: cipher->plain and plain->cipher; choose the one producing readable text
+        dec1 = keyword_decrypt(payload, keyword="SHADOW")  # map cipher->plain using our inv_map
+        # also attempt reverse mapping if needed (apply substitution in other direction)
+        # build forward mapping
+        forward_map, inv_map = build_keyword_alphabet("SHADOW")
+        # apply forward map as if payload were plaintext -> cipher; to reverse, we invert map
+        # But we already have 'keyword_decrypt' as cipher->plain. If result looks like english, return.
+        # Heuristic: contains vowels and letters
+        if sum(ch.lower() in 'aeiou' for ch in dec1) >= max(1, len(dec1)//10):
+            return dec1
+        # else try brute-force reverse mapping (treat payload as if mapping was opposite)
+        reverse_map = {v:k for k,v in build_keyword_alphabet("SHADOW")[0].items()}
+        out=[]
+        for ch in payload:
+            if ch.upper() in reverse_map:
+                p = reverse_map[ch.upper()]
+                out.append(p if ch.isupper() else p.lower())
+            else:
+                out.append(ch)
+        return "".join(out)
+
+    if ctype in ("POLYBIUS", "POLYBIUS_SQUARE"):
         return polybius_decrypt(payload)
-    if ctype in ("ROTATION_CIPHER", "ROT13", "ROT"):
+    if ctype in ("ROTATION_CIPHER","ROTATION","ROT13","ROT"):
         return rot13(payload)
-    # fallback: attempt rot13, railfence, keyword
-    attempt = rot13(payload)
-    if all(ch.isalpha() or ch.isspace() for ch in attempt):
-        return attempt
-    attempt2 = rail_fence_decrypt(payload, rails=3)
-    return attempt2
+    # fallback attempts:
+    res = rot13(payload)
+    if any(ch.isalpha() for ch in res):
+        return res
+    return rail_fence_decrypt(payload, rails=3)
 
 # ----------------------------
 # Challenge 4: Final decryption helper (heuristic)
@@ -771,6 +934,8 @@ def operation_safeguard():
 
     return jsonify(result)
 
+
+# Trading Formula
 def latex_to_python(s: str) -> str:
     s = s.strip()
     # strip $ $, \( \), \left \right and spaces
