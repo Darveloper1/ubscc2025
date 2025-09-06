@@ -19,6 +19,7 @@ import logging, secrets
 
 
 app = Flask(__name__)
+CORS(app)
 
 # Title Challenge
 @app.route("/trivia", methods=["GET"])
@@ -1650,6 +1651,120 @@ def trading_bot():
     return jsonify(minimal), 200
 
 
+# -------- 2048 helpers --------
+def normalize_grid(grid: List[List[int]]) -> List[List[int]]:
+    # UI sends null for empties; convert to 0, ensure 4x4 ints
+    g = []
+    for r in range(4):
+        row = []
+        for c in range(4):
+            v = grid[r][c] if r < len(grid) and c < len(grid[r]) else None
+            row.append(int(v) if isinstance(v, int) else 0)
+        g.append(row)
+    return g
+
+def spawn_tile(board: List[List[int]], rng: random.Random) -> bool:
+    empties = [(r, c) for r in range(4) for c in range(4) if board[r][c] == 0]
+    if not empties:
+        return False
+    r, c = rng.choice(empties)
+    board[r][c] = 4 if rng.random() < 0.1 else 2
+    return True
+
+def compress_merge_line(line: List[int]) -> Tuple[List[int], int]:
+    # slide left and merge once per pair
+    nums = [x for x in line if x != 0]
+    out, score = [], 0
+    i = 0
+    while i < len(nums):
+        if i + 1 < len(nums) and nums[i] == nums[i + 1]:
+            merged = nums[i] * 2
+            out.append(merged)
+            score += merged
+            i += 2
+        else:
+            out.append(nums[i])
+            i += 1
+    out += [0] * (4 - len(out))
+    return out, score
+
+def rotate(board: List[List[int]]) -> List[List[int]]:
+    # rotate 90° clockwise
+    return [list(row) for row in zip(*board[::-1])]
+
+def move(board: List[List[int]], direction: str) -> Tuple[List[List[int]], int, bool]:
+    # Map directions so we always merge "left"
+    work = [row[:] for row in board]
+    rot = 0
+    direction = direction.upper()
+    if direction == "UP":
+        rot = 3
+    elif direction == "RIGHT":
+        rot = 2
+    elif direction == "DOWN":
+        rot = 1
+    elif direction == "LEFT":
+        rot = 0
+    else:
+        raise ValueError("invalid direction")
+
+    for _ in range(rot):
+        work = rotate(work)
+
+    moved = False
+    score = 0
+    new_rows = []
+    for row in work:
+        new_row, gained = compress_merge_line(row)
+        moved = moved or (new_row != row)
+        score += gained
+        new_rows.append(new_row)
+
+    # rotate back
+    for _ in range((4 - rot) % 4):
+        new_rows = rotate(new_rows)
+    return new_rows, score, moved
+
+def has_moves(board: List[List[int]]) -> bool:
+    if any(0 in row for row in board):
+        return True
+    for r in range(4):
+        for c in range(4):
+            v = board[r][c]
+            if r + 1 < 4 and board[r + 1][c] == v:
+                return True
+            if c + 1 < 4 and board[r][c + 1] == v:
+                return True
+    return False
+
+# -------- API --------
+@app.route("/2048", methods=["POST"])
+def api_2048():
+    data = request.get_json(force=True, silent=True) or {}
+    grid = data.get("grid")
+    direction = (data.get("mergeDirection") or "").upper()
+
+    if not isinstance(grid, list) or direction not in {"UP", "DOWN", "LEFT", "RIGHT"}:
+        return jsonify({"error": "bad request"}), 400
+
+    board = normalize_grid(grid)
+    new_board, _, moved = move(board, direction)
+
+    # Only spawn if something actually moved/merged
+    rng = random.Random()
+    if moved:
+        spawn_tile(new_board, rng)
+
+    # Determine endgame
+    end_game = None
+    if any(2048 in row for row in new_board):
+        end_game = "win"
+    elif not has_moves(new_board):
+        end_game = "lose"
+
+    # Convert 0s back to nulls for the UI
+    next_grid = [[(v if v != 0 else None) for v in row] for row in new_board]
+    return jsonify({"nextGrid": next_grid, "endGame": end_game})
 
 # Miscellaneous
 @app.route("/")
