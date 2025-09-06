@@ -15,6 +15,8 @@ import typing as t
 import json
 from werkzeug.exceptions import HTTPException, BadRequest
 from dataclasses import dataclass
+import logging
+
 
 app = Flask(__name__)
 
@@ -1289,44 +1291,73 @@ def the_mages_gambit():
 #     out = [{"id": int(item["id"]), "decision": item["decision"]} for item in topk]
 
 #     return jsonify(out), 200
+# ==========================
+# App & Config
+# ==========================
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, default))
+    except Exception:
+        return default
 
-# =========
-# Config
-# =========
-TOP_K_DEFAULT = int(os.getenv("TOP_K", "50"))
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, default))
+    except Exception:
+        return default
+
+TOP_K_DEFAULT = _env_int("TOP_K", 50)
+PORT = _env_int("PORT", 5000)
+MAX_CONTENT_LENGTH = _env_int("MAX_CONTENT_LENGTH", 8_000_000)  # 8MB safety cap
 
 WEIGHTS = {
-    "sent": float(os.getenv("W_SENT", "1.2")),
-    "mom": float(os.getenv("W_MOM", "0.8")),
-    "ema": float(os.getenv("W_EMA", "0.4")),
-    "gap": float(os.getenv("W_GAP", "0.25")),
+    "sent": _env_float("W_SENT", 1.2),
+    "mom": _env_float("W_MOM", 0.8),
+    "ema": _env_float("W_EMA", 0.4),
+    "gap": _env_float("W_GAP", 0.25),
 }
 
 EXTREME_THRESHOLDS = (
-    float(os.getenv("THRESH_MILD", "1.2")),
-    float(os.getenv("THRESH_MED", "1.8")),
-    float(os.getenv("THRESH_EXTREME", "2.5")),
+    _env_float("THRESH_MILD", 1.2),
+    _env_float("THRESH_MED", 1.8),
+    _env_float("THRESH_EXTREME", 2.5),
 )
 
 FADE_MULTIPLIERS = {
-    "mild": float(os.getenv("FADE_MILD", "0.6")),
-    "med": float(os.getenv("FADE_MED", "0.25")),
-    "extreme": float(os.getenv("FADE_EXTREME", "-0.4")),
+    "mild": _env_float("FADE_MILD", 0.6),
+    "med": _env_float("FADE_MED", 0.25),
+    "extreme": _env_float("FADE_EXTREME", -0.4),
 }
 
-# =========
-# Metrics (very simple counters)
-# =========
-METRICS = {
-    "requests_total": 0,
-    "bad_requests_total": 0,
-    "items_seen_total": 0,
-    "responses_returned_total": 0,
-}
+# ==========================
+# JSON Logging
+# ==========================
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        base = {
+            "level": record.levelname,
+            "msg": record.getMessage(),
+            "name": record.name,
+        }
+        if record.exc_info:
+            base["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(base)
 
-# =========
-# Data types
-# =========
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+app.logger.setLevel(logging.INFO)
+app.logger.handlers.clear()
+app.logger.addHandler(handler)
+
+# ==========================
+# Lightweight validation
+# ==========================
+def _sf(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
 @dataclass
 class Candle:
     open: float
@@ -1334,61 +1365,73 @@ class Candle:
     low: float
     close: float
 
-def _sf(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
-
 def parse_candle(d: Dict[str, Any]) -> Candle | None:
-    try:
-        return Candle(
-            open=_sf(d.get("open")),
-            high=_sf(d.get("high")),
-            low=_sf(d.get("low")),
-            close=_sf(d.get("close")),
-        )
-    except Exception:
+    if not isinstance(d, dict):
         return None
+    o = _sf(d.get("open"))
+    h = _sf(d.get("high"))
+    l = _sf(d.get("low"))
+    c = _sf(d.get("close"))
+    if any(map(lambda v: v is None, [o, h, l, c])):
+        return None
+    if h < l:  # sanity
+        return None
+    return Candle(open=o, high=h, low=l, close=c)
 
-# =========
+def parse_item(idx: int, raw: Dict[str, Any]) -> Tuple[int, str, str, List[Candle], List[Candle]]:
+    """
+    Returns (id, title, source, previous_candles, observation_candles)
+    Raises ValueError on irrecoverable problems.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("item not an object")
+    iid = int(raw.get("id", idx + 1))
+    title = str(raw.get("title", "") or "")
+    source = str(raw.get("source", "") or "")
+    prev_raw = raw.get("previous_candles") or []
+    obs_raw = raw.get("observation_candles") or []
+    prev = [parse_candle(c) for c in prev_raw if isinstance(c, dict)]
+    obs = [parse_candle(c) for c in obs_raw if isinstance(c, dict)]
+    prev = [c for c in prev if c is not None]
+    obs = [c for c in obs if c is not None]
+    if not prev or not obs:
+        raise ValueError("missing candles")
+    return iid, title, source, prev, obs
+
+# ==========================
 # Sentiment resources
-# =========
+# ==========================
 BULLISH = {
-    "surge", "soar", "rally", "bull", "bullish", "breakout", "record", "ath",
-    "adopt", "adoption", "approve", "approved", "approval", "etf", "spot", "reserve",
-    "treasury", "accumulate", "accumulation", "positive", "buy", "long", "launch",
-    "listing", "support", "integrate", "integration", "partnership", "upgrade",
-    "unveil", "investment", "institutional", "raises", "funding", "liquidity",
-    "stimulus", "easing", "halving", "cut", "cuts", "rate", "rates", "qe",
-    "backed", "strategic", "reserve", "accumulating", "allocates", "allocation",
-    "greenlight", "okays", "approves", "builds", "buildout",
-    # tokens for bitcoin
-    "bitcoin", "btc", "sats", "sat"
+    "surge","soar","rally","bull","bullish","breakout","record","ath",
+    "adopt","adoption","approve","approved","approval","etf","spot","reserve",
+    "treasury","accumulate","accumulation","positive","buy","long","launch",
+    "listing","support","integrate","integration","partnership","upgrade",
+    "unveil","investment","institutional","raises","funding","liquidity",
+    "stimulus","easing","halving","cut","cuts","rate","rates","qe",
+    "backed","strategic","allocation","allocates","greenlight","okays","builds",
+    "bitcoin","btc","sats","sat"
 }
 BEARISH = {
-    "dump", "plunge", "crash", "bear", "bearish", "sell", "selloff", "rug",
-    "ban", "bans", "banned", "prohibit", "restrict", "lawsuit", "sue", "sues",
-    "hack", "exploit", "breach", "outage", "insolvent", "insolvency", "bankrupt",
-    "liquidation", "margin", "liquidated", "withdrawals", "paused", "delist",
-    "delisting", "tightening", "hike", "hikes", "qt", "seize", "penalty", "fine",
-    "criminal", "sanction", "tax", "probe", "investigation", "freeze", "frozen"
+    "dump","plunge","crash","bear","bearish","sell","selloff","rug",
+    "ban","bans","banned","prohibit","restrict","lawsuit","sue","sues",
+    "hack","exploit","breach","outage","insolvent","insolvency","bankrupt",
+    "liquidation","margin","liquidated","withdrawals","paused","delist",
+    "delisting","tightening","hike","hikes","qt","seize","penalty","fine",
+    "criminal","sanction","tax","probe","investigation","freeze","frozen"
 }
-NEGATORS = {"no", "not", "never", "none", "without", "denies", "denied", "isn’t", "isnt", "wasn’t", "wasnt"}
-EMOJI_BULL = {"🚀", "🟢", "📈", "🔥", "💎🙌", "✅", "🟩"}
-EMOJI_BEAR = {"💀", "🟥", "📉", "❌", "⚠️", "🔻"}
+NEGATORS = {"no","not","never","none","without","denies","denied","isn’t","isnt","wasn’t","wasnt"}
+EMOJI_BULL = {"🚀","🟢","📈","🔥","💎🙌","✅","🟩"}
+EMOJI_BEAR = {"💀","🟥","📉","❌","⚠️","🔻"}
 
 RE_WORD = re.compile(r"[a-zA-Z][a-zA-Z\-']+|\$[A-Za-z]+|#[A-Za-z0-9_]+")
 RE_BREAKING = re.compile(r"\b(BREAKING|URGENT|ALERT|JUST IN)\b", re.I)
 
 def tokenize(text: str) -> List[str]:
-    toks = RE_WORD.findall(text)
-    # split hashtags like #BitcoinETF -> ["bitcoin", "etf"]
+    toks = RE_WORD.findall(text or "")
     out: List[str] = []
     for t in toks:
         if t.startswith("#"):
             clean = t[1:]
-            # split camel or numeric tails
             parts = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+", clean)
             out.extend([p.lower() for p in parts if p])
         elif t.startswith("$"):
@@ -1399,87 +1442,60 @@ def tokenize(text: str) -> List[str]:
 
 def emoji_sentiment(text: str) -> float:
     s = 0.0
-    if any(e in text for e in EMOJI_BULL):
-        s += 0.5
-    if any(e in text for e in EMOJI_BEAR):
-        s -= 0.5
+    if any(e in text for e in EMOJI_BULL): s += 0.5
+    if any(e in text for e in EMOJI_BEAR): s -= 0.5
     return s
 
-def sentiment_score(title: str, source: str = "") -> Tuple[float, Dict[str, float]]:
-    """
-    Lexical sentiment with:
-      - negation window (flips next 1-2 tokens)
-      - caps/breaking boost
-      - emoji weighting
-      - source weighting (Twitter/realtime slight boost)
-    Returns (score, components).
-    """
+def sentiment_score(title: str, source: str | None) -> Tuple[float, Dict[str, float]]:
     if not title:
-        return 0.0, {"lex": 0.0, "caps": 0.0, "emoji": 0.0, "source": 0.0}
-
+        return 0.0, {"lex":0.0,"caps":0.0,"emoji":0.0,"source":0.0}
     toks = tokenize(title)
     score = 0.0
     negate_span = 0
-
     for t in toks:
         if t in NEGATORS:
-            negate_span = 2  # next 2 tokens flipped
+            negate_span = 2
             continue
         hit = 0.0
-        if t in BULLISH:
-            hit = 1.0
-        elif t in BEARISH:
-            hit = -1.0
+        if t in BULLISH: hit = 1.0
+        elif t in BEARISH: hit = -1.0
         if hit != 0.0:
             if negate_span > 0:
                 hit *= -1.0
                 negate_span -= 1
             score += hit
         elif negate_span > 0:
-            # consume window even if token not a sentiment term
             negate_span -= 1
-
-    s_caps = 0.0
-    if RE_BREAKING.search(title):
-        s_caps += 0.5
-    if title.isupper() and len(title) > 12:
-        s_caps += 0.25
-
+    s_caps = 0.5 if RE_BREAKING.search(title) else 0.0
+    if title.isupper() and len(title) > 12: s_caps += 0.25
     s_emoji = emoji_sentiment(title)
-
     s_src = 0.0
-    s = (source or "").lower()
-    if "twitter" in s or "x.com" in s or "tweet" in s:
+    src = (source or "").lower()
+    if "twitter" in src or "x.com" in src or "tweet" in src:
         s_src += 0.25
-    elif any(k in s for k in ("coindesk", "cointelegraph", "bloomberg", "reuters")):
+    elif any(k in src for k in ("coindesk","cointelegraph","bloomberg","reuters")):
         s_src += 0.15
-
-    # clamp lex a bit and normalize overall to ≈[-1.2, 1.2]
     lex = max(-3.0, min(3.0, score))
-    total = (lex + s_caps + s_emoji + s_src) / 2.5
-    return total, {"lex": lex, "caps": s_caps, "emoji": s_emoji, "source": s_src}
+    total = (lex + s_caps + s_emoji + s_src) / 2.5  # ~[-1.2, 1.2]
+    return total, {"lex":lex,"caps":s_caps,"emoji":s_emoji,"source":s_src}
 
-# =========
+# ==========================
 # Price helpers
-# =========
+# ==========================
 def atr(prev: List[Candle]) -> float:
-    if not prev:
-        return 1.0
-    rng = [(max(0.0, c.high - c.low)) for c in prev]
+    if not prev: return 1.0
+    rng = [max(0.0, c.high - c.low) for c in prev]
     avg = sum(rng) / len(rng) if rng else 1.0
     return max(avg, 1e-6)
 
 def momentum(prev: List[Candle], n: int = 3) -> float:
-    if not prev:
-        return 0.0
+    if not prev: return 0.0
     closes = [c.close for c in prev[-n:]]
-    if len(closes) < 2:
-        return 0.0
+    if len(closes) < 2: return 0.0
     return (closes[-1] - closes[0]) / (len(closes) - 1)
 
 def ema(values: List[float], alpha: float) -> float:
-    if not values:
-        return 0.0
+    if not values: return 0.0
     e = values[0]
     for v in values[1:]:
         e = alpha * v + (1 - alpha) * e
@@ -1487,8 +1503,7 @@ def ema(values: List[float], alpha: float) -> float:
 
 def ema_signal(prev: List[Candle]) -> float:
     closes = [c.close for c in prev]
-    if len(closes) < 3:
-        return 0.0
+    if len(closes) < 3: return 0.0
     fast = ema(closes[-6:] if len(closes) >= 6 else closes, 0.6)
     slow = ema(closes, 0.2)
     return fast - slow
@@ -1496,29 +1511,10 @@ def ema_signal(prev: List[Candle]) -> float:
 def zsafe(x: float, d: float) -> float:
     return 0.0 if d <= 1e-9 else x / d
 
-# =========
+# ==========================
 # Scoring
-# =========
-def score_item(item: Dict[str, Any]) -> Tuple[float, str, int, Dict[str, Any]]:
-    """
-    Returns (|score|, decision, id, debug_components)
-    """
-    iid = int(item.get("id", 0))
-    title = str(item.get("title", "") or "")
-    source = str(item.get("source", "") or "")
-
-    prev_raw = item.get("previous_candles") or []
-    obs_raw = item.get("observation_candles") or []
-
-    prev = [parse_candle(c) for c in prev_raw if isinstance(c, dict)]
-    prev = [c for c in prev if c is not None]
-    obs = [parse_candle(c) for c in obs_raw if isinstance(c, dict)]
-    obs = [c for c in obs if c is not None]
-
-    if not prev or not obs:
-        # missing data → very low-conviction default SHORT
-        return 0.0, "SHORT", iid, {"reason": "insufficient_data"}
-
+# ==========================
+def score_item(iid: int, title: str, source: str, prev: List[Candle], obs: List[Candle]) -> Tuple[float, str, int, Dict[str, Any]]:
     entry = obs[0].close
     a = atr(prev)
     mom = momentum(prev)
@@ -1526,13 +1522,12 @@ def score_item(item: Dict[str, Any]) -> Tuple[float, str, int, Dict[str, Any]]:
     last_prev_close = prev[-1].close
     gap = entry - last_prev_close
 
-    sent, sent_parts = sentiment_score(title, source)
+    sent, sent_parts = sentiment_score(title or "", source)
 
     mom_n = zsafe(mom, a)
     ema_n = zsafe(ema_sig, a)
     gap_n = zsafe(gap, a)
 
-    # weighted blend
     score = (
         WEIGHTS["sent"] * sent +
         WEIGHTS["mom"] * mom_n +
@@ -1540,103 +1535,100 @@ def score_item(item: Dict[str, Any]) -> Tuple[float, str, int, Dict[str, Any]]:
         WEIGHTS["gap"] * gap_n
     )
 
-    # fade extreme gaps
     t1, t2, t3 = EXTREME_THRESHOLDS
     if abs(gap_n) > t3:
-        score *= FADE_MULTIPLIERS["extreme"]
-        fade = "extreme"
+        score *= FADE_MULTIPLIERS["extreme"]; fade = "extreme"
     elif abs(gap_n) > t2:
-        score *= FADE_MULTIPLIERS["med"]
-        fade = "med"
+        score *= FADE_MULTIPLIERS["med"]; fade = "med"
     elif abs(gap_n) > t1:
-        score *= FADE_MULTIPLIERS["mild"]
-        fade = "mild"
+        score *= FADE_MULTIPLIERS["mild"]; fade = "mild"
     else:
         fade = "none"
 
     score = math.tanh(score)  # squash tiny noise
-
     decision = "LONG" if score > 0 else "SHORT"
     magnitude = abs(score)
-
-    debug = {
-        "entry": entry,
-        "atr": a,
-        "mom": mom, "ema_sig": ema_sig, "gap": gap,
+    dbg = {
+        "entry": entry, "atr": a, "mom": mom, "ema_sig": ema_sig, "gap": gap,
         "mom_n": mom_n, "ema_n": ema_n, "gap_n": gap_n,
-        "sent": sent, "sent_parts": sent_parts,
-        "fade": fade,
+        "sent": sent, "sent_parts": sent_parts, "fade": fade,
         "raw_score_after_fade_squashed": score,
     }
-    return magnitude, decision, iid, debug
+    return magnitude, decision, iid, dbg
 
-def pick_top_k(items: List[Dict[str, Any]], k: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Returns (response_minimal, debug_list)
-    """
-    scored = [score_item(x) for x in items]
-    # sort by |score| desc, then id asc (deterministic)
-    scored.sort(key=lambda t: (-t[0], t[2]))
+def pick_top_k(items: List[Tuple[int, str, str, List[Candle], List[Candle]]], k: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    scored: List[Tuple[float, str, int, Dict[str, Any]]] = []
+    for (iid, title, source, prev, obs) in items:
+        scored.append(score_item(iid, title, source, prev, obs))
+    scored.sort(key=lambda t: (-t[0], t[2]))  # by |score| desc, then id asc
     picked = scored[: min(k, len(scored))]
-    minimal = [{"id": iid, "decision": decision} for (_, decision, iid, _) in picked]
+    minimal = [{"id": iid, "decision": decision} for (abs_s, decision, iid, _) in picked]
     debug = [{"id": iid, "decision": decision, "abs_score": abs_s, **dbg} for (abs_s, decision, iid, dbg) in picked]
     return minimal, debug
 
-# =========
-# HTTP
-# =========
+# ==========================
+# Metrics
+# ==========================
+METRICS = {
+    "requests_total": 0,
+    "bad_requests_total": 0,
+    "items_seen_total": 0,
+    "responses_returned_total": 0,
+}
+
+# ==========================
+# Routes
+# ==========================
 @app.route("/trading-bot", methods=["POST"])
 def trading_bot():
     METRICS["requests_total"] += 1
-    # stricter content-type helps Postman users avoid HTML/doctype issues
+
+    # Content-Type guard to avoid "<!doctype ..." JSON errors in Postman
     if not request.content_type or "application/json" not in request.content_type.lower():
         METRICS["bad_requests_total"] += 1
-        return jsonify({
-            "error": "Content-Type must be application/json",
-            "hint": "In Postman, set Headers → Content-Type: application/json"
-        }), 415
+        return jsonify({"error": "Content-Type must be application/json"}), 415
 
     try:
-        data = request.get_json(silent=False, force=False)
+        payload = request.get_json(silent=False, force=False)
     except Exception as e:
         METRICS["bad_requests_total"] += 1
+        app.logger.exception("json_parse_error")
         return jsonify({"error": "Invalid JSON payload", "details": str(e)}), 400
 
-    if not isinstance(data, list):
+    if not isinstance(payload, list):
         METRICS["bad_requests_total"] += 1
         return jsonify({"error": "Request body must be a JSON array of news events."}), 400
 
-    if len(data) == 0:
+    items: List[Tuple[int, str, str, List[Candle], List[Candle]]] = []
+    dropped = 0
+    for i, raw in enumerate(payload):
+        try:
+            items.append(parse_item(i, raw))
+        except Exception as ex:
+            dropped += 1
+            app.logger.info(json.dumps({"validation_error": str(ex), "idx": i}))
+
+    if not items:
         return jsonify([]), 200
 
-    # sanitize items & ensure IDs
-    cleaned: List[Dict[str, Any]] = []
-    for i, item in enumerate(data):
-        if not isinstance(item, dict):
-            continue
-        if "id" not in item:
-            item = dict(item)  # copy
-            item["id"] = i + 1
-        cleaned.append(item)
+    METRICS["items_seen_total"] += len(items)
 
-    METRICS["items_seen_total"] += len(cleaned)
-
+    # k selection (default 50; can override for testing via ?top_k=10)
     k = TOP_K_DEFAULT
-    # hard requirement is 50, but allow explicit override for local testing via query string, e.g., /trading-bot?top_k=5
     top_k_param = request.args.get("top_k")
     if top_k_param:
         try:
-            k = max(1, min(int(top_k_param), len(cleaned)))
+            k = max(1, min(int(top_k_param), len(items)))
         except Exception:
             pass
 
-    minimal, debug = pick_top_k(cleaned, k)
+    minimal, debug = pick_top_k(items, k)
     METRICS["responses_returned_total"] += len(minimal)
 
-    # default: minimal per spec; debug only when requested
-    if request.args.get("debug") in ("1", "true", "yes"):
-        return jsonify({"results": minimal, "debug": debug}), 200
+    if request.args.get("debug") in ("1","true","yes"):
+        return jsonify({"results": minimal, "debug": debug, "dropped_items": dropped}), 200
     return jsonify(minimal), 200
+
 
 
 # Miscellaneous
