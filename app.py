@@ -2806,6 +2806,100 @@ def duolingo_sort():
             return jsonify({"error": "part must be 'ONE' or 'TWO'"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+    
+## SAILING CLUB
+def merge_intervals(slots):
+    """
+    Merge intervals where next.start <= current.end (touching intervals merge).
+    Returns a list of [start, end] sorted by start.
+    """
+    if not slots:
+        return []
+
+    slots = sorted(slots, key=lambda x: (x[0], x[1]))
+    merged = []
+    cur_start, cur_end = slots[0]
+
+    for s, e in slots[1:]:
+        if s <= cur_end:  # overlap or touching
+            cur_end = max(cur_end, e)
+        else:
+            merged.append([cur_start, cur_end])
+            cur_start, cur_end = s, e
+
+    merged.append([cur_start, cur_end])
+    return merged
+
+def min_boats_needed(slots):
+    """
+    Sweep-line counting of maximum overlap.
+    Starts at the exact time of an end do NOT overlap (free-before-start).
+    """
+    if not slots:
+        return 0
+
+    starts = sorted(s for s, _ in slots)
+    ends = sorted(e for _, e in slots)
+
+    i = j = 0
+    active = 0
+    max_active = 0
+    n = len(starts)
+
+    while i < n and j < n:
+        if starts[i] < ends[j]:
+            active += 1
+            max_active = max(max_active, active)
+            i += 1
+        else:
+            # ends free up boats when end <= next start
+            active -= 1
+            j += 1
+
+    return max_active
+
+@app.route("/sailing-club/submission", methods=["POST"])
+def submission():
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+    except Exception:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    test_cases = payload.get("testCases", [])
+    solutions = []
+
+    for case in test_cases:
+        # Defensive parsing
+        cid = case.get("id")
+        slots = case.get("input", [])
+
+        # Validate basic structure; if invalid, skip gracefully with empty solution
+        if cid is None or not isinstance(slots, list):
+            continue
+
+        # Filter out obviously bad entries while keeping valid ones
+        clean_slots = []
+        for it in slots:
+            if (
+                isinstance(it, (list, tuple)) and
+                len(it) == 2 and
+                isinstance(it[0], int) and
+                isinstance(it[1], int) and
+                it[0] < it[1]
+            ):
+                clean_slots.append([it[0], it[1]])
+
+        merged = merge_intervals(clean_slots)
+        boats = min_boats_needed(clean_slots)
+
+        solutions.append({
+            "id": cid,
+            "sortedMergedSlots": merged,
+            "minBoatsNeeded": boats
+        })
+
+    return jsonify({"solutions": solutions}), 200
+
 
 # Miscellaneous
 @app.route("/")
