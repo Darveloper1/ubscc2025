@@ -1458,11 +1458,6 @@ else:
     print("Error:", response.status_code, response.text)
 
 
-
-# Miscellaneous
-@app.route("/")
-def testing():
-    return "Hello UBS Global Coding Challenge 2025 Singapore"
 ## CAPTURE THE FLAG
 # ------- Config -------
 PAYLOAD_DIR = os.environ.get("PAYLOAD_DIR", os.path.join(os.getcwd(), "payloads"))
