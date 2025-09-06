@@ -13,6 +13,7 @@ import time
 import threading
 import typing as t
 import json
+from werkzeug.exceptions import HTTPException, BadRequest
 
 app = Flask(__name__)
 
@@ -851,16 +852,11 @@ def duolingo_sort():
         return jsonify({"error": str(e)}), 400
     
 ## SAILING CLUB
-from flask import Flask, request, jsonify
-from werkzeug.exceptions import HTTPException, BadRequest
-import json
-import re
 
-app = Flask(__name__)
-
-# ---------- core logic ----------
+# ---------- helpers ----------
 
 def merge_intervals(slots):
+    """Merge intervals where next.start <= current.end (touching intervals merge)."""
     if not slots:
         return []
     slots = sorted(slots, key=lambda x: (x[0], x[1]))
@@ -876,18 +872,18 @@ def merge_intervals(slots):
     return merged
 
 def min_boats_needed(slots):
+    """Sweep-line max concurrency; ends free boats before equal-time starts."""
     if not slots:
         return 0
     starts = sorted(s for s, _ in slots)
-    ends = sorted(e for _, e in slots)
+    ends   = sorted(e for _, e in slots)
     i = j = 0
     active = max_active = 0
     n = len(starts)
     while i < n and j < n:
         if starts[i] < ends[j]:
             active += 1
-            if active > max_active:
-                max_active = active
+            if active > max_active: max_active = active
             i += 1
         else:
             active -= 1
@@ -898,12 +894,12 @@ def min_boats_needed(slots):
 
 @app.route("/sailing-club/submission", methods=["POST"])
 def submission():
-    # Accept strict JSON, but also clean common trailing commas
+    # Accept strict JSON, but also sanitize common trailing commas in bodies
     raw = request.data.decode("utf-8") if request.data else ""
     if not raw:
         return jsonify({"error": "Empty body", "hint": "Send JSON with key 'testCases'"}), 400
 
-    # Remove trailing commas before } or ]
+    # Remove trailing commas before } or ]  (so your sample with trailing commas works)
     cleaned = re.sub(r",\s*([}\]])", r"\1", raw)
 
     try:
@@ -920,19 +916,19 @@ def submission():
         cid = (case or {}).get("id")
         slots = (case or {}).get("input", [])
         if cid is None:
-            # keep shaping a valid response so grader doesn't crash
             solutions.append({"id": None, "sortedMergedSlots": [], "minBoatsNeeded": 0})
             continue
 
-        # basic validation of slots
+        # keep only valid [start, end] with start < end and ints
         clean = []
         for it in slots:
-            if (isinstance(it, (list, tuple)) and len(it) == 2 and
-                isinstance(it[0], int) and isinstance(it[1], int) and it[0] < it[1]):
+            if (isinstance(it, (list, tuple)) and len(it) == 2
+                and isinstance(it[0], int) and isinstance(it[1], int)
+                and it[0] < it[1]):
                 clean.append([it[0], it[1]])
 
         merged = merge_intervals(clean)
-        boats = min_boats_needed(clean)
+        boats  = min_boats_needed(clean)
 
         solutions.append({
             "id": cid,
@@ -941,7 +937,6 @@ def submission():
         })
 
     return jsonify({"solutions": solutions}), 200
-
 
 # Miscellaneous
 @app.route("/")
