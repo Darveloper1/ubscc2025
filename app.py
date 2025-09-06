@@ -943,7 +943,6 @@ SAFE = {
     "pi": math.pi, "e": math.e,
 }
 
-# ---------- helpers: balanced scans ----------
 def _balanced_slice(s, start, open_char, close_char):
     """Return (end_index, inner_string) for the balanced region starting at s[start] == open_char."""
     assert s[start] == open_char
@@ -959,7 +958,6 @@ def _balanced_slice(s, start, open_char, close_char):
         k += 1
     raise ValueError("Unbalanced delimiters")
 
-# ---------- LaTeX -> Python rewrites ----------
 def _replace_frac(s: str) -> str:
     # Replace every \frac{A}{B} with ((A)/(B))
     out = []
@@ -1127,14 +1125,6 @@ def _evaluate(latex: str, vars_map: dict) -> float:
     val = eval(expr, {"__builtins__": None, **SAFE, "__SUM__": __SUM__}, scope)
     return float(f"{float(val):.4f}")
 
-# ---------- API ----------
-@app.after_request
-def _cors(r):
-    r.headers["Access-Control-Allow-Origin"] = "*"
-    r.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    r.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    return r
-
 @app.route("/trading-formula", methods=["POST", "OPTIONS"], strict_slashes=False)
 def trading_formula():
     if request.method == "OPTIONS":
@@ -1157,6 +1147,8 @@ def trading_formula():
             app.logger.exception("formula failed: %r", t.get("formula"))
             out.append({"result": 0.0})
     return jsonify(out), 200
+
+## FOG OF WALL
 
 
 # Miscellaneous
