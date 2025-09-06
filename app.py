@@ -892,7 +892,7 @@ def min_boats_needed(slots):
 
 # ---------- routes ----------
 
-@app.route("/sailing-club/submission", methods=["POST"])
+@app.route("/sailing-club", methods=["POST"])
 def submission():
     # Accept strict JSON, but also sanitize common trailing commas in bodies
     raw = request.data.decode("utf-8") if request.data else ""
@@ -937,6 +937,127 @@ def submission():
         })
 
     return jsonify({"solutions": solutions}), 200
+
+## MAGE GAMBIT
+
+def earliest_time_for_case(intel, reserve, fronts, stamina_max):
+    """
+    Compute earliest time (in minutes) to clear all intel while obeying:
+      - Order of intel
+      - Mana & stamina constraints
+      - 10 min per new target, 0 min to extend same target
+      - 10 min cooldown to fully restore
+      - Must end in cooldown if at least one attack was cast
+    """
+    # Basic validation (kept lightweight to match challenge style)
+    if reserve <= 0 or stamina_max <= 0 or fronts <= 0:
+        return None  # invalid
+
+    for f, mp in intel:
+        if not (1 <= f <= fronts) or not (1 <= mp <= reserve):
+            return None  # invalid
+
+    mana = reserve
+    stamina = stamina_max
+    time = 0
+    last_front = None          # None means no active “locked target”
+    did_any_attack = False
+
+    i = 0
+    n = len(intel)
+    while i < n:
+        f, mp = intel[i]
+
+        # Need resources before casting this spell?
+        if mana < mp or stamina == 0:
+            # cooldown
+            time += 10
+            mana = reserve
+            stamina = stamina_max
+            last_front = None  # target lock lost
+            continue  # retry same intel after cooldown
+
+        # We can cast now
+        is_extension = (last_front == f and did_any_attack)
+        # NOTE: Extension is only possible if previous action was an attack on the same front.
+        # Our tracking uses last_front to represent the last attack's target.
+        # If we just cooled down, last_front is None so extension won't apply.
+
+        # Time cost: 0 if extension, otherwise 10
+        time += 0 if is_extension else 10
+
+        # Spend resources
+        mana -= mp
+        stamina -= 1
+        did_any_attack = True
+        last_front = f  # still locked to this front for possible extension on NEXT intel
+
+        i += 1  # move to next intel
+
+    # Must finish in cooldown if at least one attack happened and last action wasn't a cooldown
+    # If we ended right after a cooldown (e.g., because there was no intel or we already cooled),
+    # last_front would be None. The condition below only adds cooldown if we ended with an attack.
+    if did_any_attack and last_front is not None:
+        time += 10  # final cooldown
+
+    return time
+
+
+@app.route("/the-mages-gambit", methods=["POST"])
+def the_mages_gambit():
+    """
+    Expected request body (application/json):
+    [
+      {
+        "intel": [[2,1],[4,2],[4,2],[1,3]],
+        "reserve": 3,
+        "fronts": 5,
+        "stamina": 4
+      },
+      ...
+    ]
+
+    Response (application/json):
+    [
+      { "time": 70 },
+      ...
+    ]
+    """
+    try:
+        payload = request.get_json(force=True, silent=False)
+        if not isinstance(payload, list):
+            return jsonify({"error": "Body must be a JSON array of scenarios."}), 400
+
+        results = []
+        for case in payload:
+            if not isinstance(case, dict):
+                return jsonify({"error": "Each scenario must be an object."}), 400
+
+            intel = case.get("intel")
+            reserve = case.get("reserve")
+            fronts = case.get("fronts")
+            stamina = case.get("stamina")
+
+            if not isinstance(intel, list) or not all(isinstance(x, (list, tuple)) and len(x) == 2 for x in intel):
+                return jsonify({"error": "intel must be a list of [front, mp] pairs."}), 400
+            if not all(isinstance(x[0], int) and isinstance(x[1], int) for x in intel):
+                return jsonify({"error": "Each intel pair must be [int, int]."}), 400
+            if not all(x[0] >= 1 and x[1] >= 1 for x in intel):
+                return jsonify({"error": "Front and MP in intel must be >= 1."}), 400
+            if not isinstance(reserve, int) or not isinstance(fronts, int) or not isinstance(stamina, int):
+                return jsonify({"error": "reserve, fronts, stamina must be integers."}), 400
+
+            t = earliest_time_for_case(intel, reserve, fronts, stamina)
+            if t is None:
+                return jsonify({"error": "Invalid parameters: check ranges for fronts, reserve, stamina, and intel."}), 400
+            results.append({"time": t})
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        # Keep errors simple and clean for the challenge
+        return jsonify({"error": str(e)}), 400
+
 
 # Miscellaneous
 @app.route("/")
