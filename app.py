@@ -3,9 +3,8 @@ import re
 import math
 import heapq
 from typing import List, Tuple, Dict, Set
-from collections import defaultdict, deque
+from collections import defaultdict
 from statistics import median
-from itertools import chain
 import string
 
 app = Flask(__name__)
@@ -693,12 +692,7 @@ def caesar_decrypt(ciphertext, shift):
 @app.route("/operation-safeguard", methods=["POST"])
 def operation_safeguard():
     data = request.get_json(force=True)
-    result = {
-        "challenge_one": None,
-        "challenge_two": None,
-        "challenge_three": None,
-        "challenge_four": None
-    }
+    result = {}
 
     # --- Challenge 1 ---
     try:
@@ -707,7 +701,7 @@ def operation_safeguard():
         transformed_word = c1.get("transformed_encrypted_word", "")
         trans_list = parse_transformation_list(trans_str)
         recovered = reverse_transform(trans_list, transformed_word)
-        result["challenge_one"] = recovered
+        result["challenge_one"] = str(recovered)
     except Exception as e:
         result["challenge_one"] = f"ERROR: {str(e)}"
 
@@ -715,7 +709,7 @@ def operation_safeguard():
     try:
         c2 = data.get("challenge_two", [])
         numeric_param = analyze_coordinates(c2)
-        result["challenge_two"] = numeric_param
+        result["challenge_two"] = str(numeric_param)
     except Exception as e:
         result["challenge_two"] = f"ERROR: {str(e)}"
 
@@ -729,17 +723,15 @@ def operation_safeguard():
             cipher_type = fields.get("CIPHER_TYPE") or fields.get("CIPHER")
             encrypted_payload = fields.get("ENCRYPTED_PAYLOAD") or fields.get("PAYLOAD") or ""
             if not cipher_type:
-                # try to infer if payload looks like rot13 (typical uppercase letters)
                 decrypted_guess = rot13(encrypted_payload)
-                result["challenge_three"] = decrypted_guess
+                result["challenge_three"] = str(decrypted_guess)
             else:
                 decrypted = decrypt_payload(cipher_type, encrypted_payload)
-                result["challenge_three"] = decrypted
+                result["challenge_three"] = str(decrypted)
     except Exception as e:
         result["challenge_three"] = f"ERROR: {str(e)}"
 
     # --- Challenge 4 ---
-    # Heuristic: if user supplied 'final_ciphertext' and optionally 'final_method', try to decrypt using recovered items:
     try:
         final_ct = data.get("final_ciphertext", None)
         final_method = data.get("final_method", "").upper() if data.get("final_method") else ""
@@ -747,42 +739,38 @@ def operation_safeguard():
         c2_val = result["challenge_two"]
 
         if final_ct:
-            # try methods:
             final_plain = None
-            # If user specified method, try it
-            if final_method == "VIGENERE" and isinstance(c1_val, str):
+            if final_method == "VIGENERE":
                 final_plain = vigenere_decrypt(final_ct, c1_val)
-            elif final_method == "CAESAR" and isinstance(c2_val, int):
+            elif final_method == "CAESAR":
+                try:
+                    shift = int(c2_val)
+                    final_plain = caesar_decrypt(final_ct, shift)
+                except Exception:
+                    final_plain = None
+            if final_plain is None:
+                # fallback attempts
+                try:
+                    final_plain = vigenere_decrypt(final_ct, c1_val)
+                except Exception:
+                    pass
+            if final_plain is None and c2_val.isdigit():
                 final_plain = caesar_decrypt(final_ct, int(c2_val))
-            else:
-                # Try sensible combos:
-                # 1) Vigenere using challenge_one as key
-                if isinstance(c1_val, str):
-                    try:
-                        final_plain = vigenere_decrypt(final_ct, c1_val)
-                    except Exception:
-                        final_plain = None
-                # 2) Caesar using challenge_two as shift
-                if final_plain is None and isinstance(c2_val, int):
-                    try:
-                        final_plain = caesar_decrypt(final_ct, int(c2_val))
-                    except Exception:
-                        final_plain = None
-                # 3) ROT13 fallback
-                if final_plain is None:
-                    final_plain = rot13(final_ct)
-            result["challenge_four"] = final_plain
+            if final_plain is None:
+                final_plain = rot13(final_ct)
+            result["challenge_four"] = str(final_plain)
         else:
-            result["challenge_four"] = {
-                "note": "No final_ciphertext provided. Returning recovered components to use for final decryption.",
-                "recovered_key_from_challenge_one": c1_val,
-                "numeric_parameter_from_challenge_two": c2_val,
-                "decrypted_payload_from_challenge_three": result["challenge_three"]
-            }
+            result["challenge_four"] = (
+                f"No final_ciphertext provided. "
+                f"Recovered key: {c1_val}, "
+                f"numeric param: {c2_val}, "
+                f"payload: {result['challenge_three']}"
+            )
     except Exception as e:
         result["challenge_four"] = f"ERROR: {str(e)}"
 
     return jsonify(result)
+
 
 
 # Miscellaneous
