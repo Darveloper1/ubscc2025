@@ -3,7 +3,7 @@ import re
 import math
 from math import log
 import heapq
-from typing import List, Tuple, Dict, Set, Optional
+from typing import Optional, Tuple, List, Dict, Set, Callable, Any
 from collections import defaultdict, deque
 from statistics import median
 import string
@@ -12,7 +12,6 @@ import os
 import time
 import threading
 import typing as t
-
 
 app = Flask(__name__)
 
@@ -1075,7 +1074,6 @@ def trading_formula():
             out.append({"result": 0.0})
     return jsonify(out), 200
 
-## FOG OF WALL
 
 ## SNAKES AND LADDERS
 
@@ -1360,122 +1358,112 @@ def health():
 
 ## FOG OF WALL
 
-GAMES: dict[tuple[str, str], dict] = {}
+from typing import Optional, Tuple, List, Dict, Set, Callable, Any
 
-def game_key(payload: dict) -> tuple[str, str]:
+# ============================== State ===============================
+
+GAMES: Dict[Tuple[str, str], dict] = {}  # (challenger_id, game_id) -> state
+
+def game_key(payload: Dict[str, Any]) -> Tuple[str, str]:
     return (str(payload.get("challenger_id")), str(payload.get("game_id")))
 
-# ------------------------------ Helpers ------------------------------
+# ============================= Helpers ==============================
 
-DIRS: dict[str, tuple[int, int]] = {
-    "N": (0, -1),
-    "S": (0,  1),
-    "E": (1,  0),
-    "W": (-1, 0),
-}
-DIR_ORDER = ["N", "E", "S", "W"]  # tie-breaking for path shape
+DIRS: Dict[str, Tuple[int, int]] = {"N": (0, -1), "S": (0, 1), "E": (1, 0), "W": (-1, 0)}
+DIR_ORDER = ["N", "E", "S", "W"]
 
 def in_bounds(x: int, y: int, L: int) -> bool:
     return 0 <= x < L and 0 <= y < L
 
-def bfs_next_step(start: tuple[int,int], goal: tuple[int,int], L: int, is_wall: t.Callable[[int,int], bool]) -> tuple[str|None, list[tuple[int,int]]|None]:
-    """Return (dir, path) where dir is first step direction toward goal avoiding known walls.
-       Unknown cells are treated as traversable (optimistic); 'is_wall(x,y)' says if currently known as wall.
-       If already at goal -> (None, []).
-    """
+def bfs_next_step(
+    start: Tuple[int, int],
+    goal: Tuple[int, int],
+    L: int,
+    is_wall: Callable[[int, int], bool],
+) -> Tuple[Optional[str], Optional[List[Tuple[int, int]]]]:
+    """Shortest path first step avoiding known walls; unknown = traversable."""
     if start == goal:
         return None, []
 
     sx, sy = start
     gx, gy = goal
     q = deque([(sx, sy)])
-    parent: dict[tuple[int,int], tuple[int,int]|None] = {(sx, sy): None}
+    parent: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {(sx, sy): None}
 
     while q:
         x, y = q.popleft()
         for d in DIR_ORDER:
             dx, dy = DIRS[d]
             nx, ny = x + dx, y + dy
-            if not in_bounds(nx, ny, L):
-                continue
-            if is_wall(nx, ny):
-                continue
-            if (nx, ny) in parent:
+            if not in_bounds(nx, ny, L) or is_wall(nx, ny) or (nx, ny) in parent:
                 continue
             parent[(nx, ny)] = (x, y)
             if (nx, ny) == (gx, gy):
                 # reconstruct
-                path = [(gx, gy)]
+                path: List[Tuple[int, int]] = [(gx, gy)]
                 cur = (x, y)
                 while cur is not None:
                     path.append(cur)
                     cur = parent[cur]
                 path.reverse()  # start -> ... -> goal
-                first = path[1]  # first move from start
-                fx, fy = first
+                fx, fy = path[1]
                 ddx, ddy = fx - sx, fy - sy
                 for d2, (vx, vy) in DIRS.items():
                     if (ddx, ddy) == (vx, vy):
                         return d2, path
                 return None, path
             q.append((nx, ny))
-
-    # no path found under current knowledge (rare unless boxed in)
     return None, None
 
-def centers_mod5(L: int) -> list[int]:
-    """All indices k in [0..L-1] such that k ≡ 2 (mod 5). Ensure at least one fallback center exists."""
+def centers_mod5(L: int) -> List[int]:
     cs = [k for k in range(L) if (k - 2) % 5 == 0]
-    if not cs:
-        # tiny boards fallback: pick middle
-        cs = [L // 2]
-    return cs
+    return cs or [L // 2]
 
-def build_scan_centers(L: int) -> set[tuple[int,int]]:
-    xs = centers_mod5(L)
-    ys = centers_mod5(L)
+def build_scan_centers(L: int) -> Set[Tuple[int, int]]:
+    xs, ys = centers_mod5(L), centers_mod5(L)
     return {(x, y) for x in xs for y in ys}
 
-def format_submission(walls_set: set[tuple[int,int]]) -> list[str]:
+def clamp_scan_center(L: int, x: int, y: int) -> Tuple[int, int]:
+    # Valid centers must allow a full 5x5 window inside the grid
+    return (min(max(x, 2), L - 3), min(max(y, 2), L - 3))
+
+def format_submission(walls_set: Set[Tuple[int, int]]) -> List[str]:
     return [f"{x}-{y}" for (x, y) in sorted(walls_set, key=lambda p: (p[0], p[1]))]
 
-# --------------------------- Game lifecycle --------------------------
+# ========================== Game lifecycle ==========================
 
-def init_game(payload: dict):
-    """Initialize state for a new test case."""
+def init_game(payload: Dict[str, Any]) -> None:
     tc = payload["test_case"]
     L = int(tc["length_of_grid"])
     N = int(tc["num_of_walls"])
-    crows = { str(c["id"]): (int(c["x"]), int(c["y"])) for c in tc["crows"] }
+    crows: Dict[str, Tuple[int, int]] = {str(c["id"]): (int(c["x"]), int(c["y"])) for c in tc["crows"]}
 
-    centers = build_scan_centers(L)
-
-    # Map legend: '?' unknown, '.' empty, 'W' wall
-    grid: list[list[str]] = [["?" for _ in range(L)] for _ in range(L)]
+    grid: List[List[str]] = [["?" for _ in range(L)] for _ in range(L)]
     for _, (cx, cy) in crows.items():
         if in_bounds(cx, cy, L):
-            grid[cy][cx] = "."  # we stand on a free cell
+            grid[cy][cx] = "."
 
     GAMES[game_key(payload)] = {
-        "L": L,                       # grid size
-        "N": N,                       # number of walls to discover
-        "grid": grid,                 # discovered map
-        "walls": set(),               # {(x,y)}
-        "scanned": set(),             # {(x,y)} positions we've scanned from
-        "centers": set(centers),      # planned tiling scan positions
+        "L": L,
+        "N": N,
+        "grid": grid,                 # '?' unknown, '.' free, 'W' wall
+        "walls": set(),               # Set[(x,y)]
+        "scanned_from": set(),        # where we've actually scanned
+        "dead_centers": set(),        # centers that would reveal ~0 new cells; skip later
+        "centers": build_scan_centers(L),
         "crows": dict(crows),         # id -> (x,y)
-        "assignments": {},            # id -> target (x,y)
-        "turn_idx": 0,                # for fair fallback turns
+        "assignments": {},            # id -> target center
+        "last_good_gain": {},         # id -> last chosen target gain
+        "turn_idx": 0,
         "crow_list": list(crows.keys()),
     }
 
-def state_for(payload: dict):
+def state_for(payload: Dict[str, Any]) -> Optional[dict]:
     return GAMES.get(game_key(payload))
 
-# ----------------------------- Learning ------------------------------
+# ============================== Learning ============================
 
-def mark_cell(st: dict, x: int, y: int, val: str):
-    """val in {'.','W'}; keep 'W' dominating, otherwise prefer known over unknown."""
+def mark_cell(st: dict, x: int, y: int, val: str) -> None:
     if not in_bounds(x, y, st["L"]):
         return
     prev = st["grid"][y][x]
@@ -1485,40 +1473,30 @@ def mark_cell(st: dict, x: int, y: int, val: str):
     elif prev == "?":
         st["grid"][y][x] = "."
 
-def integrate_scan(st: dict, crow_id: str, scan_result: list[list[str]]):
+def integrate_scan(st: dict, crow_id: str, scan_result: List[List[str]]) -> None:
     cx, cy = st["crows"][crow_id]
     L = st["L"]
-    # scan_result is 5x5, row-major, [0][0] = (cx-2, cy-2)
     for r in range(5):
         row = scan_result[r] if r < len(scan_result) else []
         for c in range(5):
             ch = row[c] if c < len(row) else "_"
-            ax = cx + (c - 2)
-            ay = cy + (r - 2)
-            if ch == "X":
-                continue
-            if not in_bounds(ax, ay, L):
+            ax, ay = cx + (c - 2), cy + (r - 2)
+            if ch == "X" or not in_bounds(ax, ay, L):
                 continue
             if ch == "W":
                 mark_cell(st, ax, ay, "W")
             else:
-                # '_' or 'C' => free
                 mark_cell(st, ax, ay, ".")
-    st["scanned"].add((cx, cy))
+    st["scanned_from"].add((cx, cy))
 
-def _parse_xy(value) -> tuple[int, int] | None:
-    """Accepts [x, y], (x, y), or dict forms like {'x':1,'y':2} or {'position':[x,y]}.
-       Returns (x, y) as ints or None if unparseable.
-    """
+def _parse_xy(value: Any) -> Optional[Tuple[int, int]]:
     if value is None:
         return None
-    # list/tuple
     if isinstance(value, (list, tuple)) and len(value) >= 2:
         try:
             return int(value[0]), int(value[1])
         except Exception:
             return None
-    # dict variants
     if isinstance(value, dict):
         if "x" in value and "y" in value:
             try:
@@ -1540,88 +1518,150 @@ def _parse_xy(value) -> tuple[int, int] | None:
                         return None
     return None
 
-def learn_from_move(st: dict, crow_id: str, direction: str | None, move_result_xy):
+def learn_from_move(st: dict, crow_id: str, direction: Optional[str], move_result_xy: Any) -> None:
     old_x, old_y = st["crows"][crow_id]
     parsed = _parse_xy(move_result_xy)
     if parsed is None:
-        # Can't interpret the server payload; ensure current cell marked free and stop.
         mark_cell(st, old_x, old_y, ".")
         return
-
     nx, ny = parsed
-
-    # If we didn't move, we likely hit a wall in the attempted direction (if provided).
     if (nx, ny) == (old_x, old_y):
         if direction in DIRS:
             dx, dy = DIRS[direction]
             wx, wy = old_x + dx, old_y + dy
             if in_bounds(wx, wy, st["L"]):
                 mark_cell(st, wx, wy, "W")
-        # Keep current position marked as free.
         mark_cell(st, old_x, old_y, ".")
         return
-
-    # Successful move; mark new cell free and update crow position.
     mark_cell(st, nx, ny, ".")
     st["crows"][crow_id] = (nx, ny)
 
-# ----------------------------- Planning ------------------------------
+# ======================= Scoring & Targeting ========================
 
-def assign_targets(st: dict):
-    """Greedy nearest-center assignment for each crow to an UNscanned center not already scanned or assigned."""
-    unscanned_centers = [p for p in st["centers"] if p not in st["scanned"]]
-    # Remove centers we already learned to be walls (can't stand there)
-    unscanned_centers = [p for p in unscanned_centers if st["grid"][p[1]][p[0]] != "W"]
-    taken: set[tuple[int,int]] = set()
-    new_assign: dict[str, tuple[int,int] | None] = {}
-    for cid, (cx, cy) in st["crows"].items():
-        # if already on an unscanned center, keep that target
-        if (cx, cy) in unscanned_centers:
-            new_assign[cid] = (cx, cy)
-            taken.add((cx, cy))
+def scan_gain(st: dict, center: Tuple[int, int]) -> int:
+    """How many '?' in the 5x5 window centered at center."""
+    cx, cy = center
+    L = st["L"]
+    if (cx, cy) in st["dead_centers"]:
+        return 0
+    gain = 0
+    for dy in range(-2, 3):
+        yy = cy + dy
+        if yy < 0 or yy >= L:
             continue
-        # choose nearest available center
-        best = None
-        best_d = 10**9
-        for p in unscanned_centers:
-            if p in taken:
+        row = st["grid"][yy]
+        for dx in range(-2, 3):
+            xx = cx + dx
+            if xx < 0 or xx >= L:
                 continue
-            d = abs(p[0] - cx) + abs(p[1] - cy)
-            if d < best_d:
-                best_d, best = d, p
-        new_assign[cid] = best
-        if best is not None:
-            taken.add(best)
+            if row[xx] == "?":
+                gain += 1
+    return gain
+
+def voronoi_owner(crows: Dict[str, Tuple[int, int]], center: Tuple[int, int]) -> str:
+    """Assign a center to the nearest crow by Manhattan distance (ties -> lowest crow id)."""
+    cx, cy = center
+    best_id, best_d = None, 10**9
+    for cid, (x, y) in crows.items():
+        d = abs(cx - x) + abs(cy - y)
+        if d < best_d or (d == best_d and (best_id is None or cid < best_id)):
+            best_id, best_d = cid, d
+    return best_id or next(iter(crows.keys()))
+
+def assign_targets(st: dict) -> None:
+    """Pick targets with best (gain / (dist+1)) inside each crow's Voronoi region."""
+    L = st["L"]
+    crows = st["crows"]
+    centers = st["centers"]
+
+    # precompute gains and owner
+    candidates_by_owner: Dict[str, List[Tuple[int, Tuple[int, int], int]]] = {cid: [] for cid in crows.keys()}
+    for ctr in centers:
+        if ctr in st["scanned_from"]:
+            continue
+        g = scan_gain(st, ctr)
+        if g <= 1:       # skip nearly-useless scans to save actions
+            st["dead_centers"].add(ctr)
+            continue
+        owner = voronoi_owner(crows, ctr)
+        candidates_by_owner[owner].append((g, ctr, 0))  # 0 placeholder for distance
+
+    new_assign: Dict[str, Optional[Tuple[int, int]]] = {}
+
+    for cid, pos in crows.items():
+        cx, cy = pos
+        best_score = -1.0
+        best_target = None
+
+        # Consider top candidates near this crow
+        cands = candidates_by_owner.get(cid, [])
+        if not cands:
+            new_assign[cid] = None
+            continue
+
+        # Rough distance = Manhattan (cheap)
+        for g, ctr, _ in cands:
+            tx, ty = ctr
+            dist = abs(tx - cx) + abs(ty - cy)
+            # Score = info gain per step (travel + 1 scan)
+            score = float(g) / float(dist + 1)
+            # prefer higher score; tie-break by lower dist then higher g
+            if (score > best_score) or (
+                score == best_score and (best_target is None or dist < (abs(best_target[0]-cx)+abs(best_target[1]-cy)) or (dist == abs(best_target[0]-cx)+abs(best_target[1]-cy) and g > scan_gain(st, best_target)))
+            ):
+                best_score = score
+                best_target = ctr
+
+        # Stability: keep current assignment if still decent
+        current = st["assignments"].get(cid)
+        if current and current not in st["scanned_from"]:
+            current_gain = scan_gain(st, current)
+            if current_gain > 1:
+                cur_dist = abs(current[0] - cx) + abs(current[1] - cy)
+                cur_score = float(current_gain) / float(cur_dist + 1)
+                # keep if within 10% of the new best to avoid thrashing
+                if best_score <= cur_score * 1.1:
+                    best_target = current
+                    best_score = cur_score
+
+        new_assign[cid] = best_target
+        if best_target is not None:
+            st["last_good_gain"][cid] = scan_gain(st, best_target)
+
     st["assignments"] = new_assign
 
-def any_on_unscanned_center(st: dict) -> str|None:
-    for cid, (cx, cy) in st["crows"].items():
-        if (cx, cy) in st["centers"] and (cx, cy) not in st["scanned"]:
+def any_scan_now(st: dict) -> Optional[str]:
+    """If a crow stands on a good, unscanned center, scan immediately."""
+    for cid, (x, y) in st["crows"].items():
+        if (x, y) in st["scanned_from"]:
+            continue
+        # Only scan if it still has gain
+        g = scan_gain(st, (x, y))
+        if g > 0:
             return cid
+        else:
+            # Mark useless center so we don't try again
+            st["dead_centers"].add((x, y))
     return None
 
-def pick_move(st: dict) -> tuple[str, str]:
-    """Pick a crow and a 1-step move toward its assigned target.
-       Returns (crow_id, direction|'SCAN_IN_PLACE')
-    """
+def pick_move(st: dict) -> Tuple[str, str]:
+    """Choose a crow and either a direction or 'SCAN_IN_PLACE'."""
     L = st["L"]
-
-    # Ensure we have assignments
     assign_targets(st)
 
-    # Prefer the crow with the shortest planned path
-    best: tuple[str, str] | None = None
+    # Try to move toward best targets (first step by BFS)
+    best: Optional[Tuple[str, str]] = None
     best_len = 10**9
+
     for cid, target in st["assignments"].items():
         if target is None:
             continue
         cur = st["crows"][cid]
-
-        # if standing on target, scanning will be handled elsewhere
         if cur == target:
+            # will scan via any_scan_now
             continue
 
-        def is_wall(x, y):
+        def is_wall(x: int, y: int) -> bool:
             return st["grid"][y][x] == "W"
 
         d, path = bfs_next_step(cur, target, L, is_wall)
@@ -1634,73 +1674,70 @@ def pick_move(st: dict) -> tuple[str, str]:
     if best is not None:
         return best[0], best[1]
 
-    # Fallback 1: If boxed / no path, scan in place for any crow not yet scanned from its current cell
-    for cid, (cx, cy) in st["crows"].items():
-        if (cx, cy) not in st["scanned"]:
+    # Frontier fallback: scan where we are if it still reveals anything
+    for cid, pos in st["crows"].items():
+        if pos not in st["scanned_from"] and scan_gain(st, pos) > 0:
             return cid, "SCAN_IN_PLACE"
 
-    # Fallback 2: Find any unknown cell and steer a crow to a scan point that covers it.
-    unknowns = []
+    # Last resort: pick nearest place that covers the first unknown cell
+    unknown = None
     for y in range(L):
         for x in range(L):
             if st["grid"][y][x] == "?":
-                unknowns.append((x, y))
-    if unknowns:
-        ux, uy = unknowns[0]
-        # pick a scan position whose 5x5 includes (ux,uy)
-        tx = min(max(ux, 2), L - 3)
-        ty = min(max(uy, 2), L - 3)
-        best_cid, best_d, best_dir = None, 10**9, None
+                unknown = (x, y)
+                break
+        if unknown:
+            break
+    if unknown:
+        ux, uy = unknown
+        tx, ty = clamp_scan_center(L, ux, uy)
+        best_cid, best_dir, best_len = None, None, 10**9
         for cid, (cx, cy) in st["crows"].items():
-            def is_wall(x, y):
+            def is_wall2(x: int, y: int) -> bool:
                 return st["grid"][y][x] == "W"
-            d, path = bfs_next_step((cx, cy), (tx, ty), L, is_wall)
-            if d is not None and path is not None:
-                plen = len(path)
-                if plen < best_d:
-                    best_cid, best_d, best_dir = cid, plen, d
-        if best_cid is not None and best_dir is not None:
+            d, path = bfs_next_step((cx, cy), (tx, ty), L, is_wall2)
+            if d is not None and path is not None and len(path) < best_len:
+                best_cid, best_dir, best_len = cid, d, len(path)
+        if best_cid is not None:
             return best_cid, best_dir
 
-    # Fallback 3: round-robin a scan to shake loose info
+    # Round-robin scan to shake out info
     idx = st["turn_idx"] % max(1, len(st["crow_list"]))
     st["turn_idx"] += 1
     cid = st["crow_list"][idx]
     return cid, "SCAN_IN_PLACE"
 
-# ------------------------------ Endpoint -----------------------------
+# ============================== Endpoint ============================
 
 @app.route("/fog-of-wall", methods=["POST"])
 def fog_of_wall():
     payload = request.get_json(force=True)
 
-    # Start new test case
+    # New test case start
     if "test_case" in payload and payload.get("previous_action") is None:
         init_game(payload)
 
     st = state_for(payload)
     if st is None:
-        # Defensive: initialize if missing
         init_game(payload)
         st = state_for(payload)
 
-    # Integrate result of previous action (if any)
+    # Learn from previous action
     prev = payload.get("previous_action")
     if prev:
-        crow_id = str(prev.get("crow_id"))
+        cid = str(prev.get("crow_id"))
         act = prev.get("your_action")
         if act == "move":
-            direction = prev.get("direction")  # may be None on some servers
+            direction = prev.get("direction")
             move_res = prev.get("move_result")
-            # if crow_id might be missing or unknown, skip safely
-            if crow_id in st["crows"]:
-                learn_from_move(st, crow_id, direction, move_res)
+            if cid in st["crows"]:
+                learn_from_move(st, cid, direction, move_res)
         elif act == "scan":
             scan_res = prev.get("scan_result", [])
-            if crow_id in st["crows"]:
-                integrate_scan(st, crow_id, scan_res)
+            if cid in st["crows"]:
+                integrate_scan(st, cid, scan_res)
 
-    # Submit if we've found all walls
+    # Submit when done
     if len(st["walls"]) >= st["N"]:
         return jsonify({
             "challenger_id": payload.get("challenger_id"),
@@ -1709,8 +1746,8 @@ def fog_of_wall():
             "submission": format_submission(st["walls"]),
         })
 
-    # If any crow is standing on an unscanned tiling center, scan now (best value)
-    cid_scan = any_on_unscanned_center(st)
+    # Scan immediately if standing on a valuable center
+    cid_scan = any_scan_now(st)
     if cid_scan is not None:
         return jsonify({
             "challenger_id": payload.get("challenger_id"),
@@ -1719,7 +1756,7 @@ def fog_of_wall():
             "action_type": "scan",
         })
 
-    # Otherwise move one step toward assigned centers; fallbacks handle boxed situations
+    # Otherwise move toward best target
     cid, decision = pick_move(st)
     if decision == "SCAN_IN_PLACE":
         return jsonify({
@@ -1736,7 +1773,6 @@ def fog_of_wall():
             "action_type": "move",
             "direction": decision,
         })
-    
 
 #Blankety Blanks
 @app.route("/blankety", methods=["POST"])
