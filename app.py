@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response, send_file
 import re
 import math
 from math import log
@@ -1424,6 +1424,9 @@ def api_2048():
     # Convert 0s back to nulls for the UI
     next_grid = [[(v if v != 0 else None) for v in row] for row in new_board]
     return jsonify({"nextGrid": next_grid, "endGame": end_game})
+
+
+
 
 # Miscellaneous
 @app.route("/")
