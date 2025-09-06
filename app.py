@@ -18,6 +18,17 @@ from dataclasses import dataclass
 import logging, secrets
 from flask_cors import CORS
 import random
+import base64
+import io
+import numpy as np
+from PIL import Image, ImageFont, ImageDraw
+from flask import Flask, request, jsonify
+import cv2
+try:
+    import pytesseract  # type: ignore
+    TESSERACT_OK = True
+except Exception:
+    TESSERACT_OK = False
 # import requests
 
 
@@ -1561,6 +1572,509 @@ def payload_homework():
 @app.route("/payload_malicious", methods=["GET"])
 def payload_malicious():
     return _serve_payload("malicious")
+
+
+# MST
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mst-calculation")
+
+# ---------------------------
+# Utility dataclasses
+# ---------------------------
+
+@dataclass
+class Node:
+    idx: int
+    x: float
+    y: float
+    r: float
+
+@dataclass
+class Edge:
+    u: int
+    v: int
+    w: int
+
+# ---------------------------
+# Image decoding
+# ---------------------------
+
+def decode_base64_image(b64: str) -> np.ndarray:
+    """Decode base64 string (PNG) to BGR OpenCV image."""
+    try:
+        img_bytes = base64.b64decode(b64)
+        img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("cv2.imdecode returned None")
+        return img
+    except Exception as e:
+        raise ValueError(f"Invalid base64 image: {e}")
+
+# ---------------------------
+# Node detection (black circles)
+# ---------------------------
+
+def detect_nodes_balls(img: np.ndarray) -> List[Node]:
+    """
+    Detect nodes: black filled circles.
+    Approach:
+      1) Convert to HSV, threshold near black (low V).
+      2) Morph close, then find contours approximate-circle-ish.
+      3) Fit minEnclosingCircle to get centers/radii.
+    """
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    # Threshold "black": low V and low S (avoid colored edges)
+    mask_black = cv2.inRange(hsv, (0, 0, 0), (180, 255, 70))
+
+    # Clean up noise
+    mask_black = cv2.morphologyEx(mask_black, cv2.MORPH_OPEN,
+                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    mask_black = cv2.morphologyEx(mask_black, cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+
+    contours, _ = cv2.findContours(mask_black, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    nodes: List[Node] = []
+    idx = 0
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 50:  # too small
+            continue
+        (x, y), r = cv2.minEnclosingCircle(cnt)
+        # Heuristics: circularity and fill check
+        if r < 5:  # tiny specks
+            continue
+        circle_area = math.pi * r * r
+        fill_ratio = area / (circle_area + 1e-6)
+        if 0.5 <= fill_ratio <= 1.2:
+            nodes.append(Node(idx=idx, x=float(x), y=float(y), r=float(r)))
+            idx += 1
+
+    # Sort nodes by (x,y) for stable indexing
+    nodes.sort(key=lambda n: (n.x, n.y))
+    # Reassign indices to this order
+    for i, n in enumerate(nodes):
+        n.idx = i
+    logger.info(f"Detected {len(nodes)} nodes")
+    return nodes
+
+# ---------------------------
+# Edge detection
+# ---------------------------
+
+def mask_out_nodes(img: np.ndarray, nodes: List[Node]) -> np.ndarray:
+    """Return a copy with nodes inpainted to not confuse line detection."""
+    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+    for n in nodes:
+        cv2.circle(mask, (int(n.x), int(n.y)), int(n.r * 1.3), 255, -1)
+    # Inpaint to remove circles
+    inpainted = cv2.inpaint(img, mask, 5, cv2.INPAINT_TELEA)
+    return inpainted
+
+def detect_candidate_lines(img_wo_nodes: np.ndarray) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
+    """
+    Detect line segments using Canny + Probabilistic Hough.
+    Returns list of ((x1,y1),(x2,y2)).
+    """
+    gray = cv2.cvtColor(img_wo_nodes, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3, L2gradient=True)
+
+    # Slight dilate can help connect dotted/weak edges
+    edges = cv2.dilate(edges, np.ones((3,3), np.uint8), iterations=1)
+
+    lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180,
+                            threshold=50, minLineLength=25, maxLineGap=15)
+
+    segments = []
+    if lines is not None:
+        for l in lines:
+            x1, y1, x2, y2 = l[0]
+            segments.append(((x1, y1), (x2, y2)))
+    logger.info(f"Detected {len(segments)} raw line segments")
+    return segments
+
+def snap_point_to_nearest_node(px: float, py: float, nodes: List[Node], max_dist: float) -> Optional[int]:
+    """Return node idx if within max_dist, else None."""
+    best = None
+    best_d2 = max_dist * max_dist
+    for n in nodes:
+        dx = px - n.x
+        dy = py - n.y
+        d2 = dx*dx + dy*dy
+        if d2 <= best_d2:
+            best_d2 = d2
+            best = n.idx
+    return best
+
+def build_edges_from_segments(segments, nodes: List[Node]) -> Dict[Tuple[int,int], List[Tuple[Tuple[int,int],Tuple[int,int]]]]:
+    """
+    Assign segments to node pairs by snapping endpoints to nearest nodes.
+    Returns mapping (u,v)-> list of segments supporting that edge.
+    """
+    if not nodes:
+        return {}
+    # max_snap: a bit larger than average radius
+    avg_r = np.mean([n.r for n in nodes]) if nodes else 10.0
+    max_snap = max(1.5 * avg_r, 12.0)
+
+    pair_to_segments: Dict[Tuple[int,int], List[Tuple[Tuple[int,int],Tuple[int,int]]]] = {}
+    for (x1,y1),(x2,y2) in segments:
+        u = snap_point_to_nearest_node(x1, y1, nodes, max_snap)
+        v = snap_point_to_nearest_node(x2, y2, nodes, max_snap)
+        if u is None or v is None or u == v:
+            continue
+        a, b = (u, v) if u < v else (v, u)
+        pair_to_segments.setdefault((a,b), []).append(((x1,y1),(x2,y2)))
+    logger.info(f"Consolidated to {len(pair_to_segments)} unique edges (node pairs)")
+    return pair_to_segments
+
+# ---------------------------
+# OCR for weights
+# ---------------------------
+
+class DigitOCR:
+    """
+    Two-tier OCR:
+      1) Try pytesseract (if available) on a cleaned ROI.
+      2) Fallback to template matching against synthetic digit glyphs (0-9).
+    Returns integer if found, else None.
+    """
+    def __init__(self):
+        self.templates = self._build_digit_templates()
+
+    @staticmethod
+    def _build_digit_templates(size: int = 28) -> Dict[str, np.ndarray]:
+        """
+        Create binary templates for digits 0-9 using a standard PIL font.
+        We avoid requiring system fonts by using PIL's default bitmap font for robustness.
+        """
+        templates = {}
+        try:
+            # Try a clean monospace font if available on system, else default
+            font = ImageFont.truetype("DejaVuSansMono.ttf", size)
+        except Exception:
+            font = ImageFont.load_default()
+
+        for d in "0123456789":
+            img = Image.new("L", (size, size), color=0)
+            draw = ImageDraw.Draw(img)
+            w, h = draw.textsize(d, font=font)
+            draw.text(((size - w) // 2, (size - h) // 2), d, fill=255, font=font)
+            arr = np.array(img)
+            # Binarize
+            _, binr = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+            templates[d] = binr
+        return templates
+
+    def _clean_roi(self, roi_bgr: np.ndarray) -> np.ndarray:
+        """Prepare ROI for OCR: to gray, contrast boost, binarize."""
+        gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3,3), 0)
+        # Adaptive normalize
+        gray = cv2.equalizeHist(gray)
+        # Otsu
+        _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+        # Invert if background is dark
+        if th.mean() > 127:
+            return th
+        else:
+            return 255 - th
+
+    def _ocr_tesseract(self, roi_bgr: np.ndarray) -> Optional[int]:
+        if not TESSERACT_OK:
+            return None
+        try:
+            cleaned = self._clean_roi(roi_bgr)
+            pil = Image.fromarray(cleaned)
+            txt = pytesseract.image_to_string(
+                pil, config="--psm 7 -c tessedit_char_whitelist=0123456789"
+            )
+            txt = "".join(ch for ch in txt if ch.isdigit())
+            if txt:
+                return int(txt)
+        except Exception:
+            return None
+        return None
+
+    def _ocr_template(self, roi_bgr: np.ndarray) -> Optional[int]:
+        """
+        Very simple multi-digit template OCR:
+          1) Binarize.
+          2) Find connected components for digit blobs left->right.
+          3) Match each blob against 0-9 templates with normalized cross-correlation.
+        """
+        cleaned = self._clean_roi(roi_bgr)
+        # ensure white digits on black
+        bw = cleaned.copy()
+
+        # Remove tiny noise
+        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((2,2), np.uint8))
+        contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # filter plausible digit blobs
+        boxes = []
+        h, w = bw.shape
+        for cnt in contours:
+            x,y,ww,hh = cv2.boundingRect(cnt)
+            if hh < 8 or ww < 5:
+                continue
+            if hh > h*0.95 or ww > w*0.95:
+                continue
+            boxes.append((x,y,ww,hh))
+        if not boxes:
+            return None
+        boxes.sort(key=lambda b: b[0])  # left-to-right
+
+        digits = []
+        for (x,y,ww,hh) in boxes:
+            crop = bw[y:y+hh, x:x+ww]
+            # resize to template size
+            crop_rs = cv2.resize(crop, (28,28), interpolation=cv2.INTER_AREA)
+            # Match to each template by correlation
+            best_d = None
+            best_score = -1e9
+            for d, tmpl in self.templates.items():
+                res = cv2.matchTemplate(crop_rs, tmpl, cv2.TM_CCOEFF_NORMED)
+                score = float(res.max())
+                if score > best_score:
+                    best_score = score
+                    best_d = d
+            if best_d is None:
+                continue
+            digits.append(best_d)
+
+        if digits:
+            try:
+                return int("".join(digits))
+            except Exception:
+                return None
+        return None
+
+    def read_int(self, roi_bgr: np.ndarray) -> Optional[int]:
+        # Try tesseract first
+        v = self._ocr_tesseract(roi_bgr)
+        if v is not None:
+            return v
+        # Fallback
+        return self._ocr_template(roi_bgr)
+
+# ---------------------------
+# Weight extraction for each edge
+# ---------------------------
+
+def extract_edge_weight(img: np.ndarray,
+                        segs: List[Tuple[Tuple[int,int],Tuple[int,int]]],
+                        nodes: List[Node],
+                        ocr: DigitOCR) -> Optional[int]:
+    """
+    Given one logical edge represented by multiple segments,
+    sample a small ROI around the geometric midpoint of the *longest* segment,
+    then OCR the number.
+    """
+    if not segs:
+        return None
+    # pick longest segment for stability
+    def seg_len(s):
+        (x1,y1),(x2,y2) = s
+        return (x1-x2)**2 + (y1-y2)**2
+    segs_sorted = sorted(segs, key=seg_len, reverse=True)
+    (x1,y1),(x2,y2) = segs_sorted[0]
+    mx = int((x1 + x2) / 2)
+    my = int((y1 + y2) / 2)
+
+    h, w = img.shape[:2]
+    # ROI size based on image scale
+    roi_w = max(24, min(80, w // 15))
+    roi_h = max(24, min(80, h // 15))
+    x0 = max(0, mx - roi_w//2)
+    y0 = max(0, my - roi_h//2)
+    x1 = min(w, x0 + roi_w)
+    y1 = min(h, y0 + roi_h)
+    roi = img[y0:y1, x0:x1].copy()
+
+    # extra cleaning: since weight color matches edge color, boost saturation
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hch, sch, vch = cv2.split(hsv)
+    # emphasize colored strokes vs background
+    vch = cv2.equalizeHist(vch)
+    hsv = cv2.merge([hch, sch, vch])
+    roi_proc = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    # OCR
+    val = ocr.read_int(roi_proc)
+    if val is not None:
+        return val
+
+    # Try slightly larger neighborhood if first try failed
+    roi_w2 = min(120, roi_w + 24)
+    roi_h2 = min(120, roi_h + 24)
+    x0 = max(0, mx - roi_w2//2)
+    y0 = max(0, my - roi_h2//2)
+    x1 = min(w, x0 + roi_w2)
+    y1 = min(h, y0 + roi_h2)
+    roi2 = img[y0:y1, x0:x1].copy()
+    val2 = ocr.read_int(roi2)
+    return val2
+
+# ---------------------------
+# MST (Kruskal)
+# ---------------------------
+
+class DSU:
+    def __init__(self, n):
+        self.p = list(range(n))
+        self.r = [0]*n
+    def find(self, x):
+        while self.p[x] != x:
+            self.p[x] = self.p[self.p[x]]
+            x = self.p[x]
+        return x
+    def union(self, a, b) -> bool:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return False
+        if self.r[ra] < self.r[rb]:
+            ra, rb = rb, ra
+        self.p[rb] = ra
+        if self.r[ra] == self.r[rb]:
+            self.r[ra] += 1
+        return True
+
+def mst_weight(n_nodes: int, edges: List[Edge]) -> int:
+    edges_sorted = sorted(edges, key=lambda e: e.w)
+    dsu = DSU(n_nodes)
+    total = 0
+    picked = 0
+    for e in edges_sorted:
+        if dsu.union(e.u, e.v):
+            total += e.w
+            picked += 1
+            if picked == n_nodes - 1:
+                break
+    return int(total)
+
+# ---------------------------
+# Main extraction pipeline
+# ---------------------------
+
+def extract_graph_and_mst(image_bgr: np.ndarray) -> int:
+    nodes = detect_nodes_balls(image_bgr)
+
+    if len(nodes) < 2:
+        # Fallback: if node detection is weak, try HoughCircles quickly
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.medianBlur(gray, 5)
+        circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2,
+                                   minDist=20, param1=100, param2=30,
+                                   minRadius=5, maxRadius=0)
+        if circles is not None:
+            nodes = []
+            for i, c in enumerate(np.round(circles[0, :]).astype("int")):
+                x, y, r = c
+                nodes.append(Node(idx=i, x=float(x), y=float(y), r=float(r)))
+            nodes.sort(key=lambda n: (n.x, n.y))
+            for i, n in enumerate(nodes):
+                n.idx = i
+
+    if len(nodes) < 2:
+        raise ValueError("Could not detect enough nodes in graph image.")
+
+    img_wo_nodes = mask_out_nodes(image_bgr, nodes)
+    segments = detect_candidate_lines(img_wo_nodes)
+    pair_to_segments = build_edges_from_segments(segments, nodes)
+
+    if not pair_to_segments:
+        # If no segments matched, relax by using all segments and try snapping to nearest two nodes along the line midpoint direction
+        raise ValueError("Could not detect edges in graph image.")
+
+    ocr = DigitOCR()
+    edges: List[Edge] = []
+    for (u,v), segs in pair_to_segments.items():
+        w_val = extract_edge_weight(image_bgr, segs, nodes, ocr)
+        if w_val is None:
+            # As last resort, expand search along entire segment (sample 3 points)
+            best = None
+            for s in segs[:2]:
+                (x1,y1),(x2,y2) = s
+                for t in (0.45, 0.5, 0.55):
+                    mx = int(x1*(1-t) + x2*t)
+                    my = int(y1*(1-t) + y2*t)
+                    h, w = image_bgr.shape[:2]
+                    roi = image_bgr[max(0,my-40):min(h,my+40), max(0,mx-40):min(w,mx+40)]
+                    val_try = ocr.read_int(roi)
+                    if val_try is not None:
+                        best = val_try
+                        break
+                if best is not None:
+                    break
+            w_val = best
+
+        if w_val is None:
+            # If still None, we cannot proceed robustly; skip this edge
+            logger.warning(f"Failed OCR for edge ({u},{v}); skipping")
+            continue
+
+        edges.append(Edge(u=u, v=v, w=int(w_val)))
+
+    # Deduplicate multi-detected edges by keeping the minimum weight seen (should be identical anyway)
+    dedup: Dict[Tuple[int,int], int] = {}
+    for e in edges:
+        key = (min(e.u, e.v), max(e.u, e.v))
+        if key not in dedup or e.w < dedup[key]:
+            dedup[key] = e.w
+    edges = [Edge(u=k[0], v=k[1], w=w) for k, w in dedup.items()]
+
+    if len(edges) < len(nodes) - 1:
+        # Not enough edges detected; try to be permissive: we cannot compute MST
+        raise ValueError("Insufficient edges detected to form MST.")
+
+    total = mst_weight(len(nodes), edges)
+    return total
+
+# ---------------------------
+# Flask endpoint
+# ---------------------------
+
+@app.route("/mst-calculation", methods=["POST"])
+def mst_calculation():
+    """
+    Expected input (application/json):
+    [
+      {"image": "<base64>"},
+      {"image": "<base64>"}
+    ]
+    Output:
+    [
+      {"value": <int>},
+      {"value": <int>}
+    ]
+    """
+    if not request.is_json:
+        return jsonify({"error": "Expected application/json"}), 415
+
+    try:
+        payload = request.get_json(force=True)
+        if not isinstance(payload, list) or not payload:
+            return jsonify({"error": "Expected a non-empty JSON array"}), 400
+
+        results = []
+        for i, item in enumerate(payload):
+            if not isinstance(item, dict) or "image" not in item:
+                return jsonify({"error": f"Item {i} missing 'image' field"}), 400
+
+            b64 = item["image"]
+            img = decode_base64_image(b64)
+            value = extract_graph_and_mst(img)
+            results.append({"value": int(value)})
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        logger.exception("Failed to process MST calculation")
+        return jsonify({"error": str(e)}), 400
+
 
 if __name__ == '__main__':
     os.makedirs(PAYLOAD_DIR, exist_ok=True)
