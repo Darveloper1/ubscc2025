@@ -1646,7 +1646,7 @@ GLOBAL_LOCK = threading.Lock()
 
 # ----------------------------- Flask Route -----------------------------
 
-@app.post("/fog-of-wall")
+@app.route("/fog-of-wall", methods=["POST"])
 def fog_of_wall():
     payload = request.get_json(force=True, silent=True) or {}
     challenger_id = str(payload.get("challenger_id", ""))
