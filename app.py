@@ -2424,7 +2424,7 @@ def _solve_single(obj):
     return _best_cycle_max_product(goods, rates)
 
 
-@app.route("https://ubscc2025-uogd.onrender.com/The-Ink-Archive", methods=["POST"])
+@app.route("ubscc2025-uogd.onrender.com/The-Ink-Archive", methods=["POST"])
 def the_ink_archive():
     try:
         payload = request.get_json(force=True, silent=False)
