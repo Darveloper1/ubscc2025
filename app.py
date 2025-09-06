@@ -1,8 +1,9 @@
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response
+import math
 
 app = Flask(__name__)
 
-@app.route("/trivia", methods="GET")
+@app.route("/trivia", methods=["GET"])
 def trivia():
     return {
         "answers": [
@@ -39,9 +40,14 @@ def calculate_points(customer, concert, priority):
 
     return points
 
-@app.route("/ticketing-agent", methods=["POST"])
+@app.route("/ticketing-agent", methods=["POST", "OPTIONS"])
 def ticketing_agent():
-    data = request.get_json()
+    if request.method == "OPTIONS":
+        return ("", 204)
+    
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify(error="Expected JSON body with Content-Type: application/json"), 400
 
     customers = data.get("customers", [])
     concerts = data.get("concerts", [])
