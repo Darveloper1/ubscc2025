@@ -935,74 +935,99 @@ def operation_safeguard():
     return jsonify(result)
 
 
-# Trading Formula
+# TRADING FORMULA
+
+SAFE = {
+    "max": max, "min": min, "abs": abs,
+    "log": math.log, "ln": math.log, "exp": math.exp, "sqrt": math.sqrt,
+    "pi": math.pi, "e": math.e,
+}
+
+def _replace_frac(s: str) -> str:
+    # balanced \frac{A}{B} -> ((A)/(B))
+    while True:
+        i = s.find(r"\frac")
+        if i == -1: return s
+        j = s.find("{", i)
+        if j == -1: return s
+        # {A}
+        k, d = j+1, 0
+        while k < len(s):
+            if s[k] == "{": d += 1
+            elif s[k] == "}":
+                if d == 0: break
+                d -= 1
+            k += 1
+        if k >= len(s): return s
+        A = s[j+1:k]
+        k += 1
+        if k >= len(s) or s[k] != "{": return s
+        k += 1
+        b0, d = k, 0
+        while k < len(s):
+            if s[k] == "{": d += 1
+            elif s[k] == "}":
+                if d == 0: break
+                d -= 1
+            k += 1
+        if k >= len(s): return s
+        B = s[b0:k]
+        s = s[:i] + f"(({A})/({B}))" + s[k+1:]
+    # never reached
+
+def _replace_exp(s: str) -> str:
+    s = re.sub(r"e\^\{([^{}]+)\}", r"exp(\1)", s)               # e^{...}
+    s = re.sub(r"e\^([A-Za-z0-9_\.]+)", r"exp(\1)", s)           # e^x
+    return s
+
 def latex_to_python(s: str) -> str:
     s = s.strip()
-    # strip $ $, \( \), \left \right and spaces
-    s = s.replace("$$", "").replace("$", "").replace(r"\(", "").replace(r"\)", "")
-    s = s.replace(r"\left", "").replace(r"\right", "")
-    # keep only RHS if there's an equals
-    if "=" in s:
+    s = s.replace("$$","").replace("$","").replace(r"\(","").replace(r"\)","")
+    s = s.replace(r"\left","").replace(r"\right","")
+    if "=" in s:                       # keep RHS only
         s = s.split("=", 1)[1]
 
-    # \text{Var} -> Var
-    s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
+    s = _replace_frac(s)               # do BEFORE removing braces in \text
+    s = _replace_exp(s)
 
-    # latex ops & functions
-    s = s.replace(r"\times", "*").replace(r"\cdot", "*")
-    s = s.replace("·", "*").replace("−", "-")
-    s = s.replace(r"\max", "max").replace(r"\min", "min")
-    s = s.replace(r"\log", "log").replace(r"\ln", "ln")
+    s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)   # \text{X} -> X
+    s = s.replace(r"\times","*").replace(r"\cdot","*").replace("·","*")
+    s = s.replace("−","-")
+    s = s.replace(r"\max","max").replace(r"\min","min")
+    s = s.replace(r"\log","log").replace(r"\ln","ln")
 
-    # greek / latex names: \alpha -> alpha, \sigma -> sigma, etc.
-    s = re.sub(r"\\([A-Za-z]+)", r"\1", s)
+    s = re.sub(r"\\([A-Za-z]+)", r"\1", s)       # \alpha -> alpha, etc.
+    s = s.replace("[","_").replace("]","")       # E[R_m] -> E_R_m
+    s = s.replace(r"\_","_")
 
-    # subscripts and bracketed variables: Z_\alpha -> Z_alpha, E[R_m] -> E_R_m
-    s = s.replace("{", "").replace("}", "")
-    s = s.replace("[", "_").replace("]", "")
-    s = s.replace(" ", "")
-
-    # \frac{A}{B}  (after braces removed) -> (A)/(B)
-    # NOTE: with braces already removed, it will look like \fracA/B; handle both styles:
-    s = re.sub(r"\\frac\(([^)]+)\)/\(([^)]+)\)", r"(\1)/(\2)", s)  # very rare
-    s = re.sub(r"\\frac([^/]+)/([^/]+)", r"(\1)/(\2)", s)
-
-    # exponentials and powers
-    s = re.sub(r"e\^\(([^)]+)\)", r"exp(\1)", s)    # e^(...)
-    s = re.sub(r"e\^([A-Za-z0-9_\.]+)", r"exp(\1)", s)  # e^x
-    s = s.replace("^", "**")   # simple powers
-
+    s = s.replace("^","**")                      # x^2 -> x**2  (after e^ handled)
+    s = re.sub(r"\s+","", s)
     return s
 
 def eval_formula(latex: str, vars_map: dict) -> float:
     expr = latex_to_python(latex)
-    # build safe scope
     scope = {k: float(v) for k, v in vars_map.items()}
-    val = eval(expr, {"__builtins__": None, **ALLOWED}, scope)
+    val = eval(expr, {"__builtins__": None, **SAFE}, scope)
     return float(f"{float(val):.4f}")
 
-@app.route("/trading-formula", methods=["POST", "OPTIONS"], strict_slashes=False)
+@app.route("/trading-formula", methods=["POST","OPTIONS"], strict_slashes=False)
 def trading_formula():
-    if request.method == "OPTIONS":
-        return ("", 204)
-
+    if request.method == "OPTIONS": return ("", 204)
     payload = request.get_json(silent=True)
     if payload is None:
         try:
             payload = json.loads((request.data or b"").decode("utf-8"))
         except Exception:
             return jsonify(error="Expected JSON array body"), 400
-
     if not isinstance(payload, list):
         return jsonify(error="Body must be a JSON array of testcases"), 400
 
     out = []
     for t in payload:
         try:
-            res = eval_formula(t["formula"], t.get("variables", {}))
-            out.append({"result": res})
-        except Exception:
-        
+            out.append({"result": eval_formula(t["formula"], t.get("variables", {}))})
+        except Exception as e:
+            app.logger.exception("formula failed: %r", t.get("formula"))
             out.append({"result": 0.0})
     return jsonify(out), 200
 
