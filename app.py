@@ -10,6 +10,11 @@ import xml.etree.ElementTree as ET
 import os
 import time
 import threading
+import numpy as np
+from scipy import interpolate, signal
+from scipy.ndimage import gaussian_filter1d
+import warnings
+warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
 
@@ -1689,6 +1694,364 @@ def fog_of_wall():
             "action_type": "move",
             "direction": decision,
         })
+    
+
+#Blankety Blanks
+@app.route("/blankety", methods=["POST"])
+def blankety():
+    """
+    Impute missing values in 100 time series using advanced techniques.
+    Each series has 1000 elements with some null values.
+    """
+    try:
+        data = request.get_json()
+        series_list = data.get("series", [])
+        
+        if not series_list:
+            return jsonify({"error": "No series provided"}), 400
+        
+        imputed_series = []
+        
+        for series in series_list:
+            # Convert to numpy array, marking nulls as NaN
+            arr = np.array([float(x) if x is not None else np.nan for x in series])
+            
+            # Impute the series
+            imputed = impute_series(arr)
+            
+            # Convert back to list and ensure no NaNs remain
+            imputed_list = imputed.tolist()
+            
+            # Final safety check - replace any remaining NaNs with local average
+            for i in range(len(imputed_list)):
+                if np.isnan(imputed_list[i]) or np.isinf(imputed_list[i]):
+                    imputed_list[i] = get_local_average(imputed_list, i)
+            
+            imputed_series.append(imputed_list)
+        
+        return jsonify({"answer": imputed_series})
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+def impute_series(arr: np.ndarray) -> np.ndarray:
+    """
+    Main imputation function that tries multiple strategies.
+    """
+    n = len(arr)
+    valid_mask = ~np.isnan(arr)
+    
+    # If no missing values, return as is
+    if np.all(valid_mask):
+        return arr
+    
+    # If all missing, return zeros (edge case)
+    if np.all(~valid_mask):
+        return np.zeros(n)
+    
+    # Get valid indices and values
+    valid_indices = np.where(valid_mask)[0]
+    valid_values = arr[valid_mask]
+    
+    # Calculate the proportion of missing values
+    missing_ratio = 1 - np.sum(valid_mask) / n
+    
+    # Choose strategy based on data characteristics
+    result = arr.copy()
+    
+    if missing_ratio < 0.3:
+        # Low missing ratio - use cubic spline with smoothing
+        result = cubic_spline_impute(arr, valid_indices, valid_values)
+    elif missing_ratio < 0.6:
+        # Medium missing ratio - use PCHIP (shape-preserving)
+        result = pchip_impute(arr, valid_indices, valid_values)
+    else:
+        # High missing ratio - use linear with smoothing
+        result = linear_with_smoothing(arr, valid_indices, valid_values)
+    
+    # Apply adaptive smoothing based on local variance
+    result = adaptive_smooth(result, valid_mask)
+    
+    # Ensure continuity at boundaries
+    result = ensure_continuity(result, valid_mask)
+    
+    return result
+
+def cubic_spline_impute(arr: np.ndarray, valid_indices: np.ndarray, valid_values: np.ndarray) -> np.ndarray:
+    """
+    Use cubic spline interpolation with controlled smoothing.
+    """
+    n = len(arr)
+    result = arr.copy()
+    
+    try:
+        # Add boundary points if needed
+        indices, values = add_boundary_points(valid_indices, valid_values, n)
+        
+        # Create cubic spline with smoothing
+        cs = interpolate.CubicSpline(indices, values, bc_type='natural')
+        
+        # Interpolate missing values
+        all_indices = np.arange(n)
+        interpolated = cs(all_indices)
+        
+        # Only fill in missing values
+        missing_mask = np.isnan(arr)
+        result[missing_mask] = interpolated[missing_mask]
+        
+        # Apply mild smoothing to reduce noise
+        if len(valid_indices) > 10:
+            sigma = min(2, n / 100)
+            result = gaussian_filter1d(result, sigma=sigma)
+            # Restore original valid values
+            result[~missing_mask] = arr[~missing_mask]
+        
+    except Exception:
+        # Fallback to linear
+        result = linear_interpolate(arr, valid_indices, valid_values)
+    
+    return result
+
+def pchip_impute(arr: np.ndarray, valid_indices: np.ndarray, valid_values: np.ndarray) -> np.ndarray:
+    """
+    Use PCHIP (Piecewise Cubic Hermite Interpolating Polynomial) - shape-preserving.
+    """
+    n = len(arr)
+    result = arr.copy()
+    
+    try:
+        # Add boundary points
+        indices, values = add_boundary_points(valid_indices, valid_values, n)
+        
+        # PCHIP interpolation
+        pchip = interpolate.PchipInterpolator(indices, values)
+        
+        # Interpolate
+        all_indices = np.arange(n)
+        interpolated = pchip(all_indices)
+        
+        # Fill missing values
+        missing_mask = np.isnan(arr)
+        result[missing_mask] = interpolated[missing_mask]
+        
+    except Exception:
+        # Fallback
+        result = linear_interpolate(arr, valid_indices, valid_values)
+    
+    return result
+
+def linear_with_smoothing(arr: np.ndarray, valid_indices: np.ndarray, valid_values: np.ndarray) -> np.ndarray:
+    """
+    Linear interpolation followed by smoothing.
+    """
+    n = len(arr)
+    result = arr.copy()
+    
+    # Linear interpolation
+    result = linear_interpolate(arr, valid_indices, valid_values)
+    
+    # Apply stronger smoothing for high missing ratio
+    sigma = min(5, n / 50)
+    smoothed = gaussian_filter1d(result, sigma=sigma)
+    
+    # Blend original and smoothed
+    missing_mask = np.isnan(arr)
+    result[missing_mask] = smoothed[missing_mask]
+    
+    return result
+
+def linear_interpolate(arr: np.ndarray, valid_indices: np.ndarray, valid_values: np.ndarray) -> np.ndarray:
+    """
+    Basic linear interpolation.
+    """
+    n = len(arr)
+    result = arr.copy()
+    
+    try:
+        # Add boundary points
+        indices, values = add_boundary_points(valid_indices, valid_values, n)
+        
+        # Linear interpolation
+        f = interpolate.interp1d(indices, values, kind='linear', fill_value='extrapolate')
+        
+        # Fill missing values
+        all_indices = np.arange(n)
+        interpolated = f(all_indices)
+        
+        missing_mask = np.isnan(arr)
+        result[missing_mask] = interpolated[missing_mask]
+        
+    except Exception:
+        # Last resort - forward/backward fill
+        result = forward_backward_fill(arr)
+    
+    return result
+
+def add_boundary_points(indices: np.ndarray, values: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Add boundary points for better extrapolation.
+    """
+    indices_list = list(indices)
+    values_list = list(values)
+    
+    # Add start point if needed
+    if 0 not in indices:
+        # Extrapolate backward
+        if len(indices) >= 2:
+            slope = (values[1] - values[0]) / (indices[1] - indices[0])
+            val_0 = values[0] - slope * indices[0]
+            indices_list.insert(0, 0)
+            values_list.insert(0, val_0)
+        else:
+            indices_list.insert(0, 0)
+            values_list.insert(0, values[0])
+    
+    # Add end point if needed
+    if n-1 not in indices:
+        # Extrapolate forward
+        if len(indices) >= 2:
+            slope = (values[-1] - values[-2]) / (indices[-1] - indices[-2])
+            val_n = values[-1] + slope * (n - 1 - indices[-1])
+            indices_list.append(n - 1)
+            values_list.append(val_n)
+        else:
+            indices_list.append(n - 1)
+            values_list.append(values[-1])
+    
+    return np.array(indices_list), np.array(values_list)
+
+def adaptive_smooth(arr: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
+    """
+    Apply adaptive smoothing based on local variance.
+    """
+    n = len(arr)
+    result = arr.copy()
+    
+    # Calculate local variance using sliding window
+    window_size = min(50, n // 10)
+    local_vars = np.zeros(n)
+    
+    for i in range(n):
+        start = max(0, i - window_size // 2)
+        end = min(n, i + window_size // 2)
+        window_valid = valid_mask[start:end]
+        
+        if np.sum(window_valid) > 2:
+            window_values = arr[start:end][window_valid]
+            local_vars[i] = np.var(window_values)
+    
+    # Smooth the variance estimate
+    local_vars = gaussian_filter1d(local_vars, sigma=5)
+    
+    # Apply adaptive smoothing to imputed values
+    missing_mask = ~valid_mask
+    if np.any(missing_mask):
+        # Normalize variance to [0, 1]
+        if np.max(local_vars) > 0:
+            norm_vars = local_vars / np.max(local_vars)
+        else:
+            norm_vars = np.zeros(n)
+        
+        # Apply variable smoothing
+        for i in np.where(missing_mask)[0]:
+            # Less smoothing for high variance regions
+            sigma = 0.5 + (1 - norm_vars[i]) * 2
+            start = max(0, i - int(sigma * 3))
+            end = min(n, i + int(sigma * 3))
+            
+            if end - start > 1:
+                weights = np.exp(-0.5 * ((np.arange(start, end) - i) / sigma) ** 2)
+                weights /= weights.sum()
+                result[i] = np.sum(result[start:end] * weights)
+    
+    return result
+
+def ensure_continuity(arr: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
+    """
+    Ensure smooth transitions between imputed and original values.
+    """
+    n = len(arr)
+    result = arr.copy()
+    missing_mask = ~valid_mask
+    
+    # Find transition points
+    transitions = []
+    for i in range(1, n):
+        if valid_mask[i-1] != valid_mask[i]:
+            transitions.append(i)
+    
+    # Smooth around transitions
+    for t in transitions:
+        start = max(0, t - 5)
+        end = min(n, t + 5)
+        
+        if end - start > 2:
+            # Apply local smoothing
+            result[start:end] = gaussian_filter1d(result[start:end], sigma=1)
+            
+            # Restore original valid values
+            for i in range(start, end):
+                if valid_mask[i]:
+                    result[i] = arr[i]
+    
+    return result
+
+def forward_backward_fill(arr: np.ndarray) -> np.ndarray:
+    """
+    Simple forward and backward fill for edge cases.
+    """
+    result = arr.copy()
+    n = len(arr)
+    
+    # Forward fill
+    last_valid = np.nan
+    for i in range(n):
+        if not np.isnan(arr[i]):
+            last_valid = arr[i]
+        elif not np.isnan(last_valid):
+            result[i] = last_valid
+    
+    # Backward fill remaining
+    last_valid = np.nan
+    for i in range(n-1, -1, -1):
+        if not np.isnan(result[i]):
+            last_valid = result[i]
+        elif not np.isnan(last_valid):
+            result[i] = last_valid
+    
+    # If still NaNs, use global mean
+    if np.any(np.isnan(result)):
+        global_mean = np.nanmean(arr)
+        if not np.isnan(global_mean):
+            result[np.isnan(result)] = global_mean
+        else:
+            result[np.isnan(result)] = 0
+    
+    return result
+
+def get_local_average(arr: List[float], idx: int, window: int = 10) -> float:
+    """
+    Get local average for final safety check.
+    """
+    n = len(arr)
+    start = max(0, idx - window)
+    end = min(n, idx + window + 1)
+    
+    values = []
+    for i in range(start, end):
+        if i != idx and not (np.isnan(arr[i]) or np.isinf(arr[i])):
+            values.append(arr[i])
+    
+    if values:
+        return np.mean(values)
+    
+    # Last resort - scan entire array
+    all_valid = [x for x in arr if not (np.isnan(x) or np.isinf(x))]
+    if all_valid:
+        return np.mean(all_valid)
+    
+    return 0.0
+
 
 # Miscellaneous
 @app.route("/")
