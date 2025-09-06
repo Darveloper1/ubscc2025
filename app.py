@@ -1061,156 +1061,402 @@ def the_mages_gambit():
 
 # Trading Bot
 # --- simple sentiment keyword lists (extend as needed) ---
-POSITIVE_WORDS = {
-    "surge", "rally", "bull", "bullish", "gain", "gains", "soar", "skyrock",
-    "record", "beat", "up", "upside", "pump", "adopt", "adoption", "approve",
-    "signed", "clearance", "support", "backing", "strategic", "reserve"
-}
-NEGATIVE_WORDS = {
-    "crash", "dump", "bear", "bearish", "drop", "drops", "plummet", "panic",
-    "slash", "selloff", "sack", "sacks", "ban", "baned", "illegal", "fine",
-    "hack", "breach", "default", "debt", "loss", "lower", "down", "fall"
-}
+# POSITIVE_WORDS = {
+#     "surge", "rally", "bull", "bullish", "gain", "gains", "soar", "skyrock",
+#     "record", "beat", "up", "upside", "pump", "adopt", "adoption", "approve",
+#     "signed", "clearance", "support", "backing", "strategic", "reserve"
+# }
+# NEGATIVE_WORDS = {
+#     "crash", "dump", "bear", "bearish", "drop", "drops", "plummet", "panic",
+#     "slash", "selloff", "sack", "sacks", "ban", "baned", "illegal", "fine",
+#     "hack", "breach", "default", "debt", "loss", "lower", "down", "fall"
+# }
 
-def clean_text(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9 ]+", " ", s.lower())
+# def clean_text(s: str) -> str:
+#     return re.sub(r"[^A-Za-z0-9 ]+", " ", s.lower())
 
-def sentiment_score(title: str) -> float:
+# def sentiment_score(title: str) -> float:
+#     """
+#     crude sentiment: (+1) if positive words appear, (-1) if negative appear.
+#     If both appear, scores combine. Score normalized to [-1,1].
+#     """
+#     text = clean_text(title)
+#     toks = set(text.split())
+#     pos = len(POSITIVE_WORDS & toks)
+#     neg = len(NEGATIVE_WORDS & toks)
+#     if pos == 0 and neg == 0:
+#         return 0.0
+#     score = (pos - neg) / (pos + neg)
+#     return max(-1.0, min(1.0, score))
+
+# def safe_get_last_close(candles: List[Dict]) -> float:
+#     if not candles:
+#         return None
+#     return float(candles[-1]["close"])
+
+# def safe_get_first_obs_close(candles: List[Dict]) -> float:
+#     if not candles:
+#         return None
+#     return float(candles[0]["close"])
+
+# def compute_momentum(prev_candles: List[Dict], obs_candles: List[Dict]) -> float:
+#     """
+#     Returns a normalized momentum: (obs0_close - prev_last_close)/prev_last_close
+#     If data missing returns 0.0
+#     """
+#     prev_close = safe_get_last_close(prev_candles)
+#     obs0 = safe_get_first_obs_close(obs_candles)
+#     if prev_close is None or obs0 is None or prev_close == 0:
+#         return 0.0
+#     return (obs0 - prev_close) / prev_close  # e.g. 0.01 => +1% move
+
+# def compute_volatility(prev_candles: List[Dict]) -> float:
+#     """
+#     Simple volatility measure: std of returns across prev candles' closes.
+#     If insufficient candles => small positive default.
+#     """
+#     closes = [float(c["close"]) for c in prev_candles if "close" in c]
+#     if len(closes) < 2:
+#         return 0.0
+#     returns = []
+#     for i in range(1, len(closes)):
+#         prev = closes[i-1]
+#         cur = closes[i]
+#         if prev == 0:
+#             continue
+#         returns.append((cur - prev) / prev)
+#     if not returns:
+#         return 0.0
+#     mean = sum(returns) / len(returns)
+#     var = sum((r - mean) ** 2 for r in returns) / len(returns)
+#     return math.sqrt(var)
+
+# def sigmoid(x: float) -> float:
+#     # numerically stable sigmoid
+#     if x >= 0:
+#         z = math.exp(-x)
+#         return 1 / (1 + z)
+#     else:
+#         z = math.exp(x)
+#         return z / (1 + z)
+
+# def score_event(e: Dict) -> Dict:
+#     """
+#     Return a dict with id, probability_of_long, and decision.
+#     Weights chosen heuristically. Deterministic (no training).
+#     """
+#     sid = e.get("id")
+#     title = e.get("title", "")
+#     prev = e.get("previous_candles", []) or []
+#     obs = e.get("observation_candles", []) or []
+
+#     s_sent = sentiment_score(title)          # [-1,1]
+#     s_mom = compute_momentum(prev, obs)      # small-ish (e.g. -0.05..+0.05)
+#     s_vol = compute_volatility(prev)         # e.g. 0..0.05 typically
+
+#     # Heuristic combination:
+#     # - momentum is strong signal: positive => favors LONG, negative => SHORT
+#     # - sentiment nudges direction
+#     # - volatility reduces confidence slightly (divides contribution)
+#     # We normalize by a small factor so momentum matters at percent level.
+#     # weights
+#     w_sent = 0.8
+#     w_mom = 20.0   # scale momentum (which is a small fraction) to same range
+#     w_bias = 0.0   # bias term to shift overall LONG/SHORT baseline if desired
+
+#     # Confidence dampening: higher volatility -> slightly reduce magnitude
+#     vol_damp = 1.0 / (1.0 + s_vol * 50.0)  # s_vol ~0.01 => damp ~0.666 -> adjust as desired
+
+#     raw = (w_sent * s_sent) + (w_mom * s_mom) + w_bias
+#     raw *= vol_damp
+
+#     prob_long = sigmoid(raw)  # between 0 and 1
+
+#     decision = "LONG" if prob_long >= 0.5 else "SHORT"
+#     confidence = abs(prob_long - 0.5)   # how far from 0.5 we are; used for selecting top 50
+
+#     return {
+#         "id": sid,
+#         "prob_long": prob_long,
+#         "decision": decision,
+#         "confidence": confidence,
+#         "raw_score": raw,
+#         "features": {"sentiment": s_sent, "momentum": s_mom, "volatility": s_vol}
+#     }
+
+# @app.route("/trading-bot", methods=["POST"])
+# def trading_bot():
+#     """
+#     Expect JSON array of ~1000 events; return 50 selected decisions.
+#     """
+#     data = request.get_json()
+#     if not isinstance(data, list):
+#         return jsonify({"error": "expected JSON array of events"}), 400
+
+#     # Score all events
+#     scored = []
+#     for e in data:
+#         try:
+#             scored.append(score_event(e))
+#         except Exception as ex:
+#             # skip malformed event but keep going
+#             continue
+
+#     # Sort by confidence descending, pick top 50.
+#     # If fewer than 50 events available, return all.
+#     scored_sorted = sorted(scored, key=lambda x: x["confidence"], reverse=True)
+#     topk = scored_sorted[:50]
+
+#     # Build response with id + decision (uppercase)
+#     out = [{"id": int(item["id"]), "decision": item["decision"]} for item in topk]
+
+#     return jsonify(out), 200
+
+def safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def get_close(candle: Dict[str, Any]) -> float:
+    return safe_float(candle.get("close"))
+
+def get_high(candle: Dict[str, Any]) -> float:
+    return safe_float(candle.get("high"))
+
+def get_low(candle: Dict[str, Any]) -> float:
+    return safe_float(candle.get("low"))
+
+def get_open(candle: Dict[str, Any]) -> float:
+    return safe_float(candle.get("open"))
+
+# -----------------------------
+# Technical context (prev candles)
+# -----------------------------
+def compute_atr(prev: List[Dict[str, Any]]) -> float:
     """
-    crude sentiment: (+1) if positive words appear, (-1) if negative appear.
-    If both appear, scores combine. Score normalized to [-1,1].
+    Basic ATR proxy using mean of high-low over provided previous_candles.
+    Falls back to small epsilon to avoid division-by-zero.
     """
-    text = clean_text(title)
-    toks = set(text.split())
-    pos = len(POSITIVE_WORDS & toks)
-    neg = len(NEGATIVE_WORDS & toks)
-    if pos == 0 and neg == 0:
+    if not prev:
+        return 1.0
+    ranges = [max(0.0, get_high(c)-get_low(c)) for c in prev]
+    avg = sum(ranges)/len(ranges) if ranges else 1.0
+    return max(avg, 1e-6)
+
+def momentum_slope(prev: List[Dict[str, Any]]) -> float:
+    """
+    Simple slope of closes over last N (up to 3) candles.
+    """
+    if not prev:
         return 0.0
-    score = (pos - neg) / (pos + neg)
-    return max(-1.0, min(1.0, score))
-
-def safe_get_last_close(candles: List[Dict]) -> float:
-    if not candles:
-        return None
-    return float(candles[-1]["close"])
-
-def safe_get_first_obs_close(candles: List[Dict]) -> float:
-    if not candles:
-        return None
-    return float(candles[0]["close"])
-
-def compute_momentum(prev_candles: List[Dict], obs_candles: List[Dict]) -> float:
-    """
-    Returns a normalized momentum: (obs0_close - prev_last_close)/prev_last_close
-    If data missing returns 0.0
-    """
-    prev_close = safe_get_last_close(prev_candles)
-    obs0 = safe_get_first_obs_close(obs_candles)
-    if prev_close is None or obs0 is None or prev_close == 0:
-        return 0.0
-    return (obs0 - prev_close) / prev_close  # e.g. 0.01 => +1% move
-
-def compute_volatility(prev_candles: List[Dict]) -> float:
-    """
-    Simple volatility measure: std of returns across prev candles' closes.
-    If insufficient candles => small positive default.
-    """
-    closes = [float(c["close"]) for c in prev_candles if "close" in c]
+    closes = [get_close(c) for c in prev[-3:]]  # up to 3
     if len(closes) < 2:
         return 0.0
-    returns = []
-    for i in range(1, len(closes)):
-        prev = closes[i-1]
-        cur = closes[i]
-        if prev == 0:
-            continue
-        returns.append((cur - prev) / prev)
-    if not returns:
+    # normalized slope: (last - first) / (N-1)
+    return (closes[-1] - closes[0]) / (len(closes)-1)
+
+def ema(values: List[float], alpha: float = 0.5) -> float:
+    if not values:
         return 0.0
-    mean = sum(returns) / len(returns)
-    var = sum((r - mean) ** 2 for r in returns) / len(returns)
-    return math.sqrt(var)
+    e = values[0]
+    for v in values[1:]:
+        e = alpha * v + (1 - alpha) * e
+    return e
 
-def sigmoid(x: float) -> float:
-    # numerically stable sigmoid
-    if x >= 0:
-        z = math.exp(-x)
-        return 1 / (1 + z)
-    else:
-        z = math.exp(x)
-        return z / (1 + z)
-
-def score_event(e: Dict) -> Dict:
+def ema_cross_signal(prev: List[Dict[str, Any]]) -> float:
     """
-    Return a dict with id, probability_of_long, and decision.
-    Weights chosen heuristically. Deterministic (no training).
+    Tiny EMA 'crossover' proxy: fast EMA vs slow EMA of closes.
+    Positive if fast > slow, negative otherwise.
     """
-    sid = e.get("id")
-    title = e.get("title", "")
-    prev = e.get("previous_candles", []) or []
-    obs = e.get("observation_candles", []) or []
+    closes = [get_close(c) for c in prev]
+    if len(closes) < 3:
+        return 0.0
+    fast = ema(closes[-6:], 0.6) if len(closes) >= 6 else ema(closes, 0.6)
+    slow = ema(closes, 0.2)
+    return fast - slow
 
-    s_sent = sentiment_score(title)          # [-1,1]
-    s_mom = compute_momentum(prev, obs)      # small-ish (e.g. -0.05..+0.05)
-    s_vol = compute_volatility(prev)         # e.g. 0..0.05 typically
+# -----------------------------
+# Sentiment scoring (lexical)
+# -----------------------------
+BULLISH = {
+    "surge", "soar", "rally", "bull", "bullish", "breakout", "record", "ath",
+    "adopt", "adoption", "approve", "approved", "approval", "etf", "spot etf",
+    "reserve", "treasury", "accumulate", "accumulation", "positive", "buy",
+    "long", "expands", "expansion", "launch", "list", "listing", "support",
+    "integrate", "integration", "partnership", "upgrade", "unveil", "investment",
+    "institutional", "raises", "funding", "liquidity", "stimulus", "easing",
+    "halving", "cuts rates", "rate cut", "quantitative easing", "qe"
+}
 
-    # Heuristic combination:
-    # - momentum is strong signal: positive => favors LONG, negative => SHORT
-    # - sentiment nudges direction
-    # - volatility reduces confidence slightly (divides contribution)
-    # We normalize by a small factor so momentum matters at percent level.
-    # weights
-    w_sent = 0.8
-    w_mom = 20.0   # scale momentum (which is a small fraction) to same range
-    w_bias = 0.0   # bias term to shift overall LONG/SHORT baseline if desired
+BEARISH = {
+    "dump", "plunge", "crash", "bear", "bearish", "sell", "selloff", "rug",
+    "ban", "bans", "banned", "prohibit", "restrict", "lawsuit", "sue", "sues",
+    "hack", "exploit", "breach", "outage", "insolvent", "insolvency", "bankrupt",
+    "liquidation", "margin call", "liquidated", "withdrawals paused", "delist",
+    "delisting", "tightening", "rate hike", "hikes rates", "qt", "seize",
+    "tax", "penalty", "fine", "criminal", "sanction"
+}
 
-    # Confidence dampening: higher volatility -> slightly reduce magnitude
-    vol_damp = 1.0 / (1.0 + s_vol * 50.0)  # s_vol ~0.01 => damp ~0.666 -> adjust as desired
+NEGATORS = {"no", "not", "never", "none", "without", "denies", "denied"}
 
-    raw = (w_sent * s_sent) + (w_mom * s_mom) + w_bias
-    raw *= vol_damp
+def tokenize(text: str) -> List[str]:
+    return re.findall(r"[a-zA-Z][a-zA-Z\-]+", text.lower())
 
-    prob_long = sigmoid(raw)  # between 0 and 1
+def sentiment_score(title: str, source: str = "") -> float:
+    """
+    Lightweight lexical sentiment:
+      + Count bullish and bearish cues with negation handling.
+      + Boost if source is real-time (Twitter) or text is SHOUTY.
+    Returns score in roughly [-2, 2] (soft bound).
+    """
+    if not title:
+        return 0.0
+    toks = tokenize(title)
+    score = 0.0
+    negate_next = False
+    for t in toks:
+        if t in NEGATORS:
+            negate_next = True
+            continue
+        hit = 0.0
+        if t in BULLISH:
+            hit = 1.0
+        elif t in BEARISH:
+            hit = -1.0
+        if hit != 0.0:
+            if negate_next:
+                hit *= -1.0
+                negate_next = False
+            score += hit
 
-    decision = "LONG" if prob_long >= 0.5 else "SHORT"
-    confidence = abs(prob_long - 0.5)   # how far from 0.5 we are; used for selecting top 50
+    # Emphasis: ALL CAPS chunk or common 'breaking' cue
+    caps_bonus = 0.0
+    if re.search(r"\b(BREAKING|URGENT|ALERT)\b", title.upper()):
+        caps_bonus += 0.5
+    if title.isupper() and len(title) > 12:
+        caps_bonus += 0.25
 
-    return {
-        "id": sid,
-        "prob_long": prob_long,
-        "decision": decision,
-        "confidence": confidence,
-        "raw_score": raw,
-        "features": {"sentiment": s_sent, "momentum": s_mom, "volatility": s_vol}
-    }
+    # Source weighting
+    src = (source or "").lower()
+    src_bonus = 0.0
+    if "twitter" in src or "x.com" in src or "tweet" in src:
+        src_bonus += 0.25
+    elif "coindesk" in src or "cointelegraph" in src or "bloomberg" in src or "reuters" in src:
+        src_bonus += 0.15
 
+    # Clamp slightly
+    score = max(-3.0, min(3.0, score + caps_bonus + src_bonus))
+    # Normalize to around [-1, 1.2]
+    return score / 2.5
+
+# -----------------------------
+# Scoring & decision
+# -----------------------------
+def zsafe(x: float, denom: float) -> float:
+    if denom <= 1e-9:
+        return 0.0
+    return x / denom
+
+def score_item(item: Dict[str, Any]) -> Tuple[float, str, int]:
+    """
+    Returns (score_magnitude, decision, id)
+    decision: "LONG" or "SHORT"
+    score_magnitude: absolute value used for ranking top-50
+    """
+    iid = int(item.get("id", 0))
+
+    prev = item.get("previous_candles") or []
+    obs = item.get("observation_candles") or []
+    title = str(item.get("title", "") or "")
+    source = str(item.get("source", "") or "")
+
+    if len(obs) < 1 or len(prev) < 1:
+        # If we don't have enough data, low conviction SHORT by default
+        return (0.0, "SHORT", iid)
+
+    entry = get_close(obs[0])
+
+    # Price context
+    atr = compute_atr(prev)
+    mom = momentum_slope(prev)            # raw slope
+    ema_sig = ema_cross_signal(prev)      # difference fast - slow
+    # Gap vs last prev close
+    last_prev_close = get_close(prev[-1])
+    gap = entry - last_prev_close
+
+    # Normalize to volatility
+    mom_n = zsafe(mom, atr)
+    ema_n = zsafe(ema_sig, atr)
+    gap_n = zsafe(gap, atr)
+
+    # Sentiment
+    sent = sentiment_score(title, source)
+
+    # Base score: sentiment + momentum + small weight to gap follow-through
+    # (Positive score -> LONG)
+    score = (1.2 * sent) + (0.8 * mom_n) + (0.4 * ema_n) + (0.25 * gap_n)
+
+    # Extreme move fade: if gap is huge, fade 20–40% toward contrarian
+    extreme = abs(gap_n)
+    if extreme > 2.5:
+        score *= -0.4
+    elif extreme > 1.8:
+        score *= 0.25
+    elif extreme > 1.2:
+        score *= 0.6
+
+    # Mild de-noising: squash tiny scores toward 0
+    score = math.tanh(score)
+
+    decision = "LONG" if score > 0 else "SHORT"
+    magnitude = abs(score)
+
+    return (magnitude, decision, iid)
+
+def pick_top_k(items: List[Dict[str, Any]], k: int = 50) -> List[Dict[str, Any]]:
+    scored = [score_item(x) for x in items]
+    # Sort by magnitude desc, then by id asc for determinism
+    scored.sort(key=lambda t: (-t[0], t[2]))
+    picked = scored[: min(k, len(scored))]
+    return [{"id": iid, "decision": decision} for (_, decision, iid) in picked]
+
+# -----------------------------
+# Flask route
+# -----------------------------
 @app.route("/trading-bot", methods=["POST"])
 def trading_bot():
     """
-    Expect JSON array of ~1000 events; return 50 selected decisions.
+    Expects a JSON array of up to 1000 items as described in the prompt.
+    Returns a JSON array of exactly 50 {id, decision} when possible,
+    otherwise returns as many as available if fewer than 50 inputs.
     """
-    data = request.get_json()
+    try:
+        data = request.get_json(silent=False, force=False)
+    except Exception as e:
+        # Common client mistake: posting without proper JSON content-type
+        return jsonify({"error": "Invalid JSON payload. Set Content-Type: application/json", "details": str(e)}), 400
+
     if not isinstance(data, list):
-        return jsonify({"error": "expected JSON array of events"}), 400
+        return jsonify({"error": "Request body must be a JSON array of news events."}), 400
 
-    # Score all events
-    scored = []
-    for e in data:
-        try:
-            scored.append(score_event(e))
-        except Exception as ex:
-            # skip malformed event but keep going
+    if len(data) == 0:
+        return jsonify([]), 200
+
+    # Defensive sanitation: ensure dicts and IDs exist
+    cleaned: List[Dict[str, Any]] = []
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
             continue
+        if "id" not in item:
+            # Synthesize a stable id if missing
+            item["id"] = i + 1
+        cleaned.append(item)
 
-    # Sort by confidence descending, pick top 50.
-    # If fewer than 50 events available, return all.
-    scored_sorted = sorted(scored, key=lambda x: x["confidence"], reverse=True)
-    topk = scored_sorted[:50]
-
-    # Build response with id + decision (uppercase)
-    out = [{"id": int(item["id"]), "decision": item["decision"]} for item in topk]
-
+    # Pick top-50 by conviction
+    out = pick_top_k(cleaned, k=50)
     return jsonify(out), 200
+
 
 
 # Miscellaneous
