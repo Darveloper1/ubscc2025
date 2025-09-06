@@ -133,127 +133,77 @@ def compute_all_distances(graph: Dict[int, List[Tuple[int, int]]], stations: Set
 def find_max_score_schedule(tasks: List[Dict], subway: List[Dict], starting_station: int) -> Dict:
     """
     Find the schedule with maximum score and minimum transportation cost.
-    Using interval scheduling dynamic programming.
+    Uses weighted interval scheduling DP for max score, then backtracks to
+    consider all optimal-score schedules and selects the one with min fee.
     """
-    # Build the subway graph
+    if not tasks:
+        return {"max_score": 0, "min_fee": 0, "schedule": []}
+
+    # --- Step 1: Build graph + all-pairs shortest paths ---
     graph = build_graph(subway)
-    
-    # Get all unique stations we need
-    stations = {starting_station}
-    for task in tasks:
-        stations.add(task['station'])
-    
-    # Compute all pairwise distances between relevant stations
+    stations = {starting_station} | {t["station"] for t in tasks}
     distances = compute_all_distances(graph, stations)
-    
-    # Sort tasks by end time for interval scheduling DP
+
+    # --- Step 2: Sort tasks by end time ---
+    tasks = sorted(tasks, key=lambda t: t["end"])
     n = len(tasks)
-    tasks_with_idx = [(i, task) for i, task in enumerate(tasks)]
-    tasks_with_idx.sort(key=lambda x: x[1]['end'])
-    
-    # Create mapping from original index to sorted index
-    sorted_to_original = [t[0] for t in tasks_with_idx]
-    original_to_sorted = {orig: sort for sort, orig in enumerate(sorted_to_original)}
-    
-    # Find previous compatible task for each task (last task that doesn't overlap)
-    prev_compatible = [-1] * n
-    for i in range(n):
-        for j in range(i - 1, -1, -1):
-            if tasks_with_idx[j][1]['end'] <= tasks_with_idx[i][1]['start']:
-                prev_compatible[i] = j
-                break
-    
-    # DP arrays
-    # dp[i] = (max_score, min_fee, selected_task_indices) for tasks 0..i
-    dp = [(0, 0, [])] * (n + 1)
-    
-    for i in range(n):
-        curr_task = tasks_with_idx[i][1]
-        
-        # Option 1: Don't take current task
-        option1_score = dp[i][0]
-        option1_fee = dp[i][1]
-        option1_tasks = dp[i][2]
-        
-        # Option 2: Take current task
-        prev_idx = prev_compatible[i]
-        if prev_idx == -1:
-            # First task in sequence
-            prev_score = 0
-            prev_fee = 0
-            prev_tasks = []
-            prev_station = starting_station
-        else:
-            prev_score = dp[prev_idx + 1][0]
-            prev_fee = dp[prev_idx + 1][1]
-            prev_tasks = dp[prev_idx + 1][2]
-            prev_task = tasks_with_idx[prev_tasks[-1]][1] if prev_tasks else None
-            prev_station = prev_task['station'] if prev_task else starting_station
-        
-        # Calculate fee for adding current task
-        additional_fee = 0
-        
-        # If this is the first task or we're coming from a previous task
-        if prev_station != curr_task['station']:
-            if (prev_station, curr_task['station']) in distances:
-                additional_fee = distances[(prev_station, curr_task['station'])]
-            else:
-                # Can't reach this station
-                dp[i + 1] = (option1_score, option1_fee, option1_tasks)
-                continue
-        
-        option2_score = prev_score + curr_task['score']
-        option2_fee = prev_fee + additional_fee
-        option2_tasks = prev_tasks + [i]
-        
-        # Choose better option
-        if option2_score > option1_score or (option2_score == option1_score and option2_fee < option1_fee):
-            dp[i + 1] = (option2_score, option2_fee, option2_tasks)
-        else:
-            dp[i + 1] = (option1_score, option1_fee, option1_tasks)
-    
-    # Get the best solution
-    best_score, _, best_task_indices = dp[n]
-    
-    # Now calculate the actual minimum fee including return to start
-    if not best_task_indices:
-        return {
-            'max_score': 0,
-            'min_fee': 0,
-            'schedule': []
-        }
-    
-    # Calculate total fee with return journey
-    total_fee = 0
-    
-    # From start to first task
-    first_task = tasks_with_idx[best_task_indices[0]][1]
-    if (starting_station, first_task['station']) in distances:
-        total_fee += distances[(starting_station, first_task['station'])]
-    
-    # Between consecutive tasks
-    for i in range(len(best_task_indices) - 1):
-        task1 = tasks_with_idx[best_task_indices[i]][1]
-        task2 = tasks_with_idx[best_task_indices[i + 1]][1]
-        if task1['station'] != task2['station']:
-            if (task1['station'], task2['station']) in distances:
-                total_fee += distances[(task1['station'], task2['station'])]
-    
-    # From last task back to start
-    last_task = tasks_with_idx[best_task_indices[-1]][1]
-    if (last_task['station'], starting_station) in distances:
-        total_fee += distances[(last_task['station'], starting_station)]
-    
-    # Get task names in chronological order
-    selected_tasks = [tasks_with_idx[i][1] for i in best_task_indices]
-    selected_tasks.sort(key=lambda x: x['start'])
-    schedule = [task['name'] for task in selected_tasks]
-    
+    ends = [t["end"] for t in tasks]
+
+    # --- Step 3: Precompute p[i] = last non-overlapping task ---
+    import bisect
+    p = [bisect.bisect_right(ends, tasks[i]["start"]) - 1 for i in range(n)]
+
+    # --- Step 4: Weighted interval scheduling DP ---
+    dp = [0] * (n + 1)
+    for i in range(1, n + 1):
+        without = dp[i - 1]
+        with_curr = tasks[i - 1]["score"] + dp[p[i - 1] + 1]
+        dp[i] = max(without, with_curr)
+    max_score = dp[n]
+
+    # --- Step 5: Backtrack to collect all optimal-score schedules ---
+    schedules = []
+
+    def backtrack(i, current):
+        if i == 0:
+            schedules.append(list(reversed(current)))
+            return
+        # Option 1: skip task i-1
+        if dp[i] == dp[i - 1]:
+            backtrack(i - 1, current)
+        # Option 2: take task i-1
+        if tasks[i - 1]["score"] + dp[p[i - 1] + 1] == dp[i]:
+            backtrack(p[i - 1] + 1, current + [i - 1])
+
+    backtrack(n, [])
+
+    # --- Step 6: Among schedules with max_score, compute min fee ---
+    best_fee = float("inf")
+    best_schedule = []
+
+    for sched in schedules:
+        fee = 0
+        if sched:
+            # from start to first
+            fee += distances[(starting_station, tasks[sched[0]]["station"])]
+            # between consecutive
+            for a, b in zip(sched, sched[1:]):
+                fee += distances[(tasks[a]["station"], tasks[b]["station"])]
+            # last back to start
+            fee += distances[(tasks[sched[-1]]["station"], starting_station)]
+        if fee < best_fee:
+            best_fee = fee
+            best_schedule = sched
+
+    # --- Step 7: Format output ---
+    schedule_names = [tasks[i]["name"] for i in best_schedule]
+
     return {
-        'max_score': best_score,
-        'min_fee': total_fee,
-        'schedule': schedule
+        "max_score": max_score,
+        "min_fee": best_fee if best_schedule else 0,
+        "schedule": schedule_names,
     }
+
 
 @app.route("/princess-diaries", methods=["POST"])
 def princess_diaries():
@@ -277,16 +227,11 @@ def princess_diaries():
 
 
 
-
 # Miscellaneous
 @app.route("/")
 def testing():
     return "Hello UBS Global Coding Challenge 2025 Singapore"
 
-@app.route("/health", methods=["GET"])
-def health():
-    """Health check endpoint."""
-    return jsonify({'status': 'healthy'})
 
 if __name__ == '__main__':
     app.run()
