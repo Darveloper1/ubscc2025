@@ -404,15 +404,28 @@ def find_best_cycle(goods, ratios):
 
 @app.route("/The-Ink-Archive", methods=["POST"])
 def the_ink_archive():
-    data = request.get_json()
-    results = []
+    try:
+        data = request.get_json(force=True)
+        results = []
 
-    for dataset in data:
-        goods = dataset["goods"]
-        ratios = dataset["ratios"]
-        results.append(find_best_cycle(goods, ratios))
+        for dataset in data:
+            goods = dataset.get("goods", [])
+            ratios = dataset.get("ratios", [])
+            result = find_best_cycle(goods, ratios)
 
-    return jsonify(results)
+            # Ensure safe JSON response
+            if result["path"] is None:
+                result["path"] = []
+            result["gain"] = float(result["gain"])
+            results.append(result)
+
+        return jsonify(results)
+
+    except Exception as e:
+        # Print error in logs (visible in Render logs)
+        print("Error:", str(e))
+        return jsonify({"error": str(e)}), 500
+
 
 # EPS = 1e-15
 
