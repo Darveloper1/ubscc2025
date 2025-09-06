@@ -996,7 +996,7 @@ def min_boats_needed(slots):
 
 # ---------- routes ----------
 
-@app.route("/sailing-club", methods=["POST"])
+@app.route("/", methods=["POST"])
 def submission():
     # Accept strict JSON, but also sanitize common trailing commas in bodies
     raw = request.data.decode("utf-8") if request.data else ""
